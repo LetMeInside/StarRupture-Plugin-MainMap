@@ -4,18 +4,15 @@
 
 namespace MainMapProof
 {
-    // Proof-stage target owner. Methods/destruction require admitted GT operations;
-    // an immutable submitted target may remain retained between operations.
+    // Target owner. Methods/destruction require admitted GT operations;
+    // the retained target may remain between production rendering operations.
     class BuildingTarget final
     {
     public:
-        static bool ValidateReflection();
-        bool Create(SDK::UWorld* world, bool measureClear = true);
+        bool Create(SDK::UWorld* world);
         bool Begin();
         void Draw(SDK::UMaterialInterface* material, SDK::FCanvasUVTri* triangles, int count);
         void End();
-        SDK::FLinearColor Read(int x, int y);
-        bool Check(const char* name, int x, int y, SDK::FLinearColor expected, float tolerance);
         // Explicit retryable retirement for a persistent session. Rejection
         // preserves the lease and context; the owner must remain alive.
         bool Reset();

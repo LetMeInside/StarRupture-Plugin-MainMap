@@ -41,7 +41,6 @@ namespace MainMapConfig
 
         self->config->ValidateConfig(self, &SCHEMA);
         g_enabled = self->config->ReadBool(self, "General", "Enabled", DefaultEnabled);
-        LOG_INFO("MainMap: Enabled = %s", g_enabled ? "true" : "false");
         return true;
     }
 

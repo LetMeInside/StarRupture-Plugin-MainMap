@@ -40,13 +40,10 @@ namespace
     MainMapNative::TerrainCallback g_afterTerrainConstruct = nullptr;
     MainMapNative::TerrainDestructCallback g_beforeTerrainDestruct = nullptr;
 
-    bool AdmitTerrainBoundary(const char* phase, SDK::UObject* terrain)
+    bool AdmitTerrainBoundary()
     {
         const bool gameThread=MainMapNative::IsGameThread();
-        const bool admitted=gameThread && MainMapNative::CanOperate();
-        LOG_INFO("MainMap A2.3: terrain %s object=%p thread=%lu GT=%d admitted=%d leases=%zu",
-            phase,terrain,GetCurrentThreadId(),int(gameThread),int(admitted),MainMapNative::OutstandingLeaseCount());
-        return admitted;
+        return gameThread && MainMapNative::CanOperate();
     }
 
     void TerrainConstructDetour(SDK::UObject* terrain)
@@ -54,7 +51,7 @@ namespace
         // Exactly one original call. Publication is scheduled later outside rebuilding.
         const auto original=g_functions.originalTerrainConstruct;
         original(terrain);
-        if(AdmitTerrainBoundary("after-construct",terrain) && g_afterTerrainConstruct)
+        if(AdmitTerrainBoundary() && g_afterTerrainConstruct)
             g_afterTerrainConstruct(terrain);
     }
 
@@ -62,7 +59,7 @@ namespace
     {
         // Base NativeDestruct is the original's first call; withdraw before it.
         const auto original=g_functions.originalTerrainDestruct;
-        const bool admitted=AdmitTerrainBoundary("before-destruct",terrain);
+        const bool admitted=AdmitTerrainBoundary();
         if(g_beforeTerrainDestruct) g_beforeTerrainDestruct(terrain,admitted);
         original(terrain);
     }
@@ -194,7 +191,6 @@ namespace MainMapNative
             LOG_ERROR("MainMap A2.3: mandatory terrain hook installation FAILED");
             return false;
         }
-        LOG_INFO("MainMap A2.3: mandatory terrain construct/destruct hooks installed");
         return true;
     }
 

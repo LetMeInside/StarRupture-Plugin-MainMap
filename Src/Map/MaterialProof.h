@@ -5,17 +5,14 @@ namespace MainMapProof
 {
     struct PresentationFrame final
     {
-        MainMapNative::StrongObjectLease composeMidLease,presentMidLease,solidMidLease,textureLease;
+        MainMapNative::StrongObjectLease composeMidLease,presentMidLease;
         SDK::UMaterialInstanceDynamic* composeMid=nullptr;
         SDK::UMaterialInstanceDynamic* presentMid=nullptr;
-        SDK::UMaterialInstanceDynamic* solidMid=nullptr;
         BuildingTarget target;
-        bool submitted=false;
         bool Reset();
     };
     SDK::UMaterial* LoadMaterial(const char* path, SDK::EMaterialDomain expectedDomain,
         MainMapNative::StrongObjectLease& lease);
-    bool ValidateAndMeasure(SDK::UWorld* world, SDK::UMaterial* compose, SDK::UMaterial* present);
-    bool BuildPresentationFrame(SDK::UWorld* world, SDK::UMaterial* compose, SDK::UMaterial* present,
-        PresentationFrame& frame, bool alternate, bool rejectAfterBegin = false);
+    bool PreparePresentationFrame(SDK::UWorld* world, SDK::UMaterial* compose, SDK::UMaterial* present,
+        PresentationFrame& frame);
 }

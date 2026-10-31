@@ -98,23 +98,12 @@
     <ClInclude Include="Map\BuildingLayer.h" />
     <ClInclude Include="Map\BuildingTarget.h" />
     <ClInclude Include="Map\MaterialProof.h" />
-    <ClInclude Include="Map\ProofReflection.h" />
     <ClInclude Include="Map\RenderingProof.h" />
-    <ClInclude Include="Map\RenderingProofPixels.h" />
     <ClInclude Include="Native\Fingerprints.h" />
     <ClInclude Include="Native\NativeApi.h" />
     <ClInclude Include="plugin.h" />
     <ClInclude Include="plugin_helpers.h" />
     <ClInclude Include="resource.h" />
-  </ItemGroup>
-  <ItemGroup Condition="'$(Configuration)' == 'Client Debug' Or '$(Configuration)' == 'Client Release'">
-    <ClInclude Include="Map\RenderingProof.h" />
-    <ClInclude Include="Map\BuildingTarget.h" />
-    <ClInclude Include="Map\MaterialProof.h" />
-    <ClInclude Include="Map\ProofReflection.h" />
-    <ClInclude Include="Map\RenderingProofPixels.h" />
-    <ClInclude Include="Native\Fingerprints.h" />
-    <ClInclude Include="Native\NativeApi.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="$(StarRuptureSDKSourceDir)Basic.cpp">

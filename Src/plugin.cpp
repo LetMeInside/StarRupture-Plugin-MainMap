@@ -132,14 +132,12 @@ extern "C"
             return false;
         }
 #endif
-        LOG_INFO("MainMap: initialization complete");
         return true;
     }
 
     __declspec(dllexport)
     void PluginShutdown()
     {
-        LOG_INFO("MainMap: shutting down");
 #ifdef MODLOADER_CLIENT_BUILD
         MainMapRenderingProof::Shutdown();
         UnregisterEngineShutdownCallback();

@@ -14,7 +14,7 @@
 namespace
 {
     bool g_registered = false;
-    bool g_attempted = false;
+    bool g_resourceSetupAttempted = false;
     bool g_materialsReady = false;
     PluginPakHandle g_pakHandle = 0;
 #ifdef MODLOADER_CLIENT_BUILD
@@ -32,8 +32,7 @@ namespace
         api.StructSize=sizeof(api);
         if(!entry || entry(MINIMAP_BUILDING_SESSION_ABI_VERSION,&api)!=MINIMAP_BUILDING_ABI_OK ||
             api.Version!=MINIMAP_BUILDING_SESSION_ABI_VERSION ||
-            (api.Capabilities&(MINIMAP_BUILDING_ABI_CAP_SESSION|MINIMAP_BUILDING_ABI_CAP_DIAGNOSTICS))!=
-                (MINIMAP_BUILDING_ABI_CAP_SESSION|MINIMAP_BUILDING_ABI_CAP_DIAGNOSTICS) ||
+            (api.Capabilities&MINIMAP_BUILDING_ABI_CAP_SESSION)==0 ||
             !api.OpenSession || !api.UpdateWorldRectangle || !api.Service || !api.ReadStatus || !api.CloseSession)
         {
             FreeLibrary(module);
@@ -66,59 +65,38 @@ namespace
     void ObserveTerrainConstruct(SDK::UObject* terrain)
     {
 #ifdef MODLOADER_CLIENT_BUILD
-        ExternalMapBuildingLayer::TerrainConstruct(terrain);
+        MainMapBuildingLayer::TerrainConstruct(terrain);
 #endif
     }
     void ObserveTerrainDestruct(SDK::UObject* terrain,bool admitted)
     {
 #ifdef MODLOADER_CLIENT_BUILD
         if(admitted)CloseMiniMapBuildingSession();
-        ExternalMapBuildingLayer::TerrainDestruct(terrain,admitted);
+        MainMapBuildingLayer::TerrainDestruct(terrain,admitted);
 #endif
-    }
-    void InspectExistingTerrain(const char* boundary)
-    {
-        if(!ExternalMapNative::CanOperate())
-        {
-            LOG_WARN("ExternalMap A2.3: terrain lookup at %s rejected by admission",boundary);
-            return;
-        }
-        auto* walker=g_self->hooks->ObjectWalker;
-        if(!walker->IsReady()) return;
-        for(const char* cls : {"WBP_MapMenuTerrain_C","CrUW_MapMenuTerrain","WBP_MapMenuMapArea_C","WBP_MapMenu_C"})
-        {
-            PluginObjectInfo objects[4]{};
-            const int total=walker->FindObjectsByClassNameInto(cls,PluginObjectLookup_InstanceOnly,objects,4);
-            LOG_INFO("ExternalMap A2.3: terrain lookup boundary=%s class=%s instances=%d",boundary,cls,total);
-            for(int i=0;i<total && i<4;++i)
-                LOG_INFO("ExternalMap A2.3: terrain lookup object=%p index=%d name=%s",objects[i].object,
-                    objects[i].objectIndex,objects[i].objectName);
-        }
     }
     void BeforeWorldEnd(SDK::UWorld* world,const char*)
     {
 #ifdef MODLOADER_CLIENT_BUILD
         CloseMiniMapBuildingSession();
-        ExternalMapBuildingLayer::BeforeWorldEnd(world);
+        MainMapBuildingLayer::BeforeWorldEnd(world);
 #endif
-        InspectExistingTerrain("before-world-end");
     }
 
     void OnTick(float delta)
     {
 #ifdef MODLOADER_CLIENT_BUILD
-        ExternalMapBuildingLayer::Tick(g_materialsReady);
-        if(g_miniMapSessionActive && ExternalMapNative::CanOperate() && g_miniMapBuildingApi.Service(delta)!=MINIMAP_BUILDING_ABI_OK)
+        MainMapBuildingLayer::Tick(g_materialsReady);
+        if(g_miniMapSessionActive && MainMapNative::CanOperate() && g_miniMapBuildingApi.Service(delta)!=MINIMAP_BUILDING_ABI_OK)
             g_miniMapSessionActive=false;
 #endif
-        if (g_attempted || !ExternalMapNative::CanOperate()) return;
-        g_attempted = true; // No retry after timeout or uncertain engine acceptance.
-        InspectExistingTerrain("initial-admitted-tick");
+        if (g_resourceSetupAttempted || !MainMapNative::CanOperate()) return;
+        g_resourceSetupAttempted = true; // Mount acceptance is intentionally attempted once.
         auto* pak = g_self->hooks->Pak;
         if (!pak || !pak->IsAvailable || !pak->IsAvailable() || !pak->MountResource ||
             !pak->LoadObject || !pak->ResultToString)
         {
-            LOG_ERROR("ExternalMap A2.3: pak API unavailable; compatibility gate CLOSED");
+            LOG_ERROR("MainMap: required pak API is unavailable");
             return;
         }
         HMODULE module = nullptr;
@@ -127,49 +105,51 @@ namespace
             GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
             reinterpret_cast<LPCWSTR>(&OnTick), &module))
         {
-            LOG_ERROR("ExternalMap A2.3: actual ExternalMap module lookup failed");
+            LOG_ERROR("MainMap: plugin module lookup for embedded materials failed");
             return;
         }
         PluginPakMountOptions options{};
         options.order = PLUGIN_PAK_ORDER_DEFAULT;
         const auto result = pak->MountResource(g_self, module, "30101", "30102", "30103",
             "ExternalMapMaterials", &options, &g_pakHandle);
-        LOG_INFO("ExternalMap A2.3: MountResource result=%s (%d) handle=%p module=%p",
-            pak->ResultToString(result), static_cast<int>(result),
-            g_pakHandle, module);
         if (result == PLUGIN_PAK_ALREADY_MOUNTED)
         {
-            LOG_ERROR("ExternalMap A2.3: ALREADY_MOUNTED does not prove freshness; full restart required; gate CLOSED");
+            LOG_ERROR("MainMap: embedded material mount reported already mounted; restart required");
             return;
         }
-        if (result != PLUGIN_PAK_OK || !g_pakHandle) return;
-        ExternalMapNative::StrongObjectLease composeLease,presentLease;
-        auto* compose=ExternalMapProof::LoadMaterial("/Game/Mods/MiniMap/Materials/M_BuildingCompose.M_BuildingCompose",
+        if (result != PLUGIN_PAK_OK || !g_pakHandle)
+        {
+            LOG_ERROR("MainMap: required embedded material mount failed: %s (%d), handle=%p",
+                pak->ResultToString(result),static_cast<int>(result),g_pakHandle);
+            return;
+        }
+        MainMapNative::StrongObjectLease composeLease,presentLease;
+        auto* compose=MainMapProof::LoadMaterial("/Game/Mods/MiniMap/Materials/M_BuildingCompose.M_BuildingCompose",
             SDK::EMaterialDomain::MD_Surface,composeLease);
-        if (!ExternalMapNative::CanOperate()) return;
-        auto* present=ExternalMapProof::LoadMaterial("/Game/Mods/ExternalMap/Materials/M_BuildingPresent.M_BuildingPresent",
+        if (!MainMapNative::CanOperate()) return;
+        auto* present=MainMapProof::LoadMaterial("/Game/Mods/MainMap/Materials/M_BuildingPresent.M_BuildingPresent",
             SDK::EMaterialDomain::MD_UI,presentLease);
         if(compose && present)
-            g_materialsReady=ExternalMapProof::ValidateAndMeasure(SDK::UWorld::GetWorld(),compose,present);
-        LOG_WARN("ExternalMap A2.3: diagnostic operation finished; actual Slate/presentation/lifetime remain UNVERIFIED");
+            g_materialsReady=true;
     }
 }
 
-namespace ExternalMapRenderingProof
+namespace MainMapRenderingProof
 {
     bool Initialize()
     {
         auto* engine = g_self->hooks->Engine;
         auto* world=g_self->hooks->World;
-        auto* walker=g_self->hooks->ObjectWalker;
         if (!engine || !engine->RegisterOnTick || !engine->UnregisterOnTick || !world ||
-            !world->RegisterOnBeforeWorldEndPlay || !world->UnregisterOnBeforeWorldEndPlay ||
-            !walker || !walker->IsReady || !walker->FindObjectsByClassNameInto) return false;
-        if(!ExternalMapNative::InstallTerrainHooks(g_self,ObserveTerrainConstruct,ObserveTerrainDestruct)) return false;
+            !world->RegisterOnBeforeWorldEndPlay || !world->UnregisterOnBeforeWorldEndPlay)
+        {
+            LOG_ERROR("MainMap: required engine tick/world-end callbacks are unavailable");
+            return false;
+        }
+        if(!MainMapNative::InstallTerrainHooks(g_self,ObserveTerrainConstruct,ObserveTerrainDestruct)) return false;
         DiscoverMiniMapBuildingApi(); // Optional dependency; ExternalMap initialization remains independent.
-        LOG_INFO("ExternalMap A2.3B: early terrain lifecycle ready; BuildingLayer publication enabled after material proof");
         world->RegisterOnBeforeWorldEndPlay(BeforeWorldEnd);
-        g_attempted = false;
+        g_resourceSetupAttempted = false;
         g_materialsReady = false;
         g_pakHandle = 0;
         engine->RegisterOnTick(OnTick);
@@ -181,10 +161,9 @@ namespace ExternalMapRenderingProof
     {
 #ifdef MODLOADER_CLIENT_BUILD
         ReleaseMiniMapBuildingApi();
-        ExternalMapBuildingLayer::Shutdown();
+        MainMapBuildingLayer::Shutdown();
 #endif
-        ExternalMapNative::RemoveTerrainHooks();
-        LOG_INFO("ExternalMap A2.3: proof cleanup leases=%zu",ExternalMapNative::OutstandingLeaseCount());
+        MainMapNative::RemoveTerrainHooks();
         if (g_registered && g_self && g_self->hooks && g_self->hooks->Engine)
         {
             g_self->hooks->Engine->UnregisterOnTick(OnTick);
