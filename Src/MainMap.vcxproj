@@ -95,6 +95,11 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="Config\Config.h" />
+    <ClInclude Include="Map\BuildingTarget.h" />
+    <ClInclude Include="Map\MaterialProof.h" />
+    <ClInclude Include="Map\ProofReflection.h" />
+    <ClInclude Include="Map\RenderingProof.h" />
+    <ClInclude Include="Map\RenderingProofPixels.h" />
     <ClInclude Include="Native\Fingerprints.h" />
     <ClInclude Include="Native\NativeApi.h" />
     <ClInclude Include="plugin.h" />
@@ -122,6 +127,11 @@
     </ClCompile>
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="Config\Config.cpp" />
+    <ClCompile Include="Map\BuildingTarget.cpp" />
+    <ClCompile Include="Map\MaterialProof.cpp" />
+    <ClCompile Include="Map\RenderingProof.cpp" />
+    <ClCompile Include="Native\Fingerprints.cpp" />
+    <ClCompile Include="Native\NativeApi.cpp" />
     <ClCompile Include="plugin.cpp" />
   </ItemGroup>
   <ItemGroup Condition="'$(Configuration)' == 'Client Debug' Or '$(Configuration)' == 'Client Release'">
