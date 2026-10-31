@@ -37,11 +37,12 @@ namespace MainMapProof
 
     bool BuildingTarget::Create(SDK::UWorld* world, bool measureClear)
     {
-        if (!world || !MainMapNative::CanOperate()) return false;
-        world_ = world;
-        target_ = SDK::UKismetRenderingLibrary::CreateRenderTarget2D(world,2048,2048,
+        if (!world || target_ || lease_ || !MainMapNative::CanOperate()) return false;
+        auto* candidate = SDK::UKismetRenderingLibrary::CreateRenderTarget2D(world,2048,2048,
             SDK::ETextureRenderTargetFormat::RTF_RGBA16f,{0,0,0,1},false,false);
-        if (!target_ || !lease_.Acquire(target_)) return false;
+        if (!candidate || !lease_.Acquire(candidate)) return false;
+        target_ = candidate;
+        world_ = world;
         if (!target_->bForceLinearGamma || target_->bAutoGenerateMips || target_->bSupportsUAV ||
             target_->SizeX != 2048 || target_->SizeY != 2048 ||
             target_->RenderTargetFormat != SDK::ETextureRenderTargetFormat::RTF_RGBA16f)
@@ -104,10 +105,20 @@ namespace MainMapProof
         return pass;
     }
 
+    bool BuildingTarget::Reset()
+    {
+        if (!target_ && !begun_) return true;
+        if (!MainMapNative::CanOperate()) return false;
+        End();
+        if (!lease_.Reset()) return false;
+        target_ = nullptr;
+        world_ = nullptr;
+        return true;
+    }
+
     BuildingTarget::~BuildingTarget()
     {
-        End();
-        if (!lease_.Reset()) LOG_ERROR("MainMap A2.3: target lease cleanup FAILED");
+        if (!Reset()) LOG_ERROR("MainMap A2.3: target lease cleanup FAILED");
         // Normal GC/engine resource retirement, never ReleaseRenderTarget2D.
     }
 }

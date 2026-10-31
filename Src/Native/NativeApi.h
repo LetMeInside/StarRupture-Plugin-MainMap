@@ -14,8 +14,11 @@ namespace MainMapNative
     // Same admission predicates as lease acquisition; no separate lifetime state.
     bool CanOperate() noexcept;
     using TerrainCallback = void (*)(SDK::UObject* terrain);
+    // Rejected destruction is notification only: consumer must not touch
+    // UObjects or session ownership; it may request cleanup using atomic state.
+    using TerrainDestructCallback = void (*)(SDK::UObject* terrain, bool admitted);
     bool InstallTerrainHooks(IPluginSelf* self, TerrainCallback afterConstruct,
-        TerrainCallback beforeDestruct);
+        TerrainDestructCallback beforeDestruct);
     void RemoveTerrainHooks() noexcept;
     size_t OutstandingLeaseCount() noexcept;
 

@@ -25,7 +25,10 @@ namespace MainMapProofReflection
             bool matched = false;
             for (const auto& expected : fields)
             {
-                const uint64_t flags=std::string(expected.name)=="ReturnValue" ? 0x580 : expected.flags;
+                // Most returns are by value. GetCachedGeometry is a const
+                // reference return and supplies its exact flags explicitly.
+                const uint64_t flags=std::string(expected.name)=="ReturnValue" && expected.flags==0x80 ?
+                    0x580 : expected.flags;
                 if (field->Name.GetRawString() == expected.name && prop->Offset == expected.offset &&
                     prop->ElementSize == expected.size && prop->ArrayDim == 1 &&
                     field->ClassPrivate && field->ClassPrivate->Name.GetRawString() == expected.type &&

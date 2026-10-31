@@ -4,14 +4,28 @@
 #include "plugin_helpers.h"
 #include "Engine_classes.hpp"
 #include "MaterialProof.h"
+#ifdef MODLOADER_CLIENT_BUILD
+#include "BuildingLayer.h"
+#endif
 
 namespace
 {
     bool g_registered = false;
     bool g_attempted = false;
+    bool g_materialsReady = false;
     PluginPakHandle g_pakHandle = 0;
-    void ObserveTerrainConstruct(SDK::UObject*) {}
-    void ObserveTerrainDestruct(SDK::UObject*) {}
+    void ObserveTerrainConstruct(SDK::UObject* terrain)
+    {
+#ifdef MODLOADER_CLIENT_BUILD
+        MainMapBuildingLayer::TerrainConstruct(terrain);
+#endif
+    }
+    void ObserveTerrainDestruct(SDK::UObject* terrain,bool admitted)
+    {
+#ifdef MODLOADER_CLIENT_BUILD
+        MainMapBuildingLayer::TerrainDestruct(terrain,admitted);
+#endif
+    }
     void InspectExistingTerrain(const char* boundary)
     {
         if(!MainMapNative::CanOperate())
@@ -31,47 +45,19 @@ namespace
                     objects[i].objectIndex,objects[i].objectName);
         }
     }
-    void BeforeWorldEnd(SDK::UWorld*,const char*) { InspectExistingTerrain("before-world-end"); }
-
-    SDK::UMaterial* InspectMaterial(const char* path, SDK::EMaterialDomain expectedDomain,
-        MainMapNative::StrongObjectLease& lease)
+    void BeforeWorldEnd(SDK::UWorld* world,const char*)
     {
-        auto* object = static_cast<SDK::UObject*>(g_self->hooks->Pak->LoadObject(path));
-        if (!object)
-        {
-            LOG_ERROR("MainMap A2.3: exact material load FAILED: %s", path);
-            return nullptr;
-        }
-        if (!lease.Acquire(object))
-        {
-            LOG_ERROR("MainMap A2.3: loaded object could not be retained: %s", path);
-            return nullptr;
-        }
-        // SDK GetFullName/GetName use FName::ToString, which strips slash prefixes.
-        // Raw package FName preserves the exact long package path.
-        const std::string loadedPath = object->Outer ?
-            object->Outer->Name.GetRawString() + "." + object->Name.GetRawString() : "";
-        if (!object->IsA(SDK::UMaterial::StaticClass()) || loadedPath != path)
-        {
-            LOG_ERROR("MainMap A2.3: wrong class/object identity: %s rawPath=%s",
-                object->GetFullName().c_str(), loadedPath.c_str());
-            return nullptr;
-        }
-        else
-        {
-            auto* material = static_cast<SDK::UMaterial*>(object);
-            const bool accepted = material->MaterialDomain == expectedDomain &&
-                material->BlendMode == SDK::EBlendMode::BLEND_AlphaComposite;
-            LOG_INFO("MainMap A2.3: exact object=%s domain=%u blend=%u domain/blend=%s", path,
-                static_cast<unsigned>(material->MaterialDomain), static_cast<unsigned>(material->BlendMode),
-                accepted ? "PASS" : "FAIL");
-            if (!accepted) return nullptr;
-        }
-        return static_cast<SDK::UMaterial*>(object);
+#ifdef MODLOADER_CLIENT_BUILD
+        MainMapBuildingLayer::BeforeWorldEnd(world);
+#endif
+        InspectExistingTerrain("before-world-end");
     }
 
     void OnTick(float)
     {
+#ifdef MODLOADER_CLIENT_BUILD
+        MainMapBuildingLayer::Tick(g_materialsReady);
+#endif
         if (g_attempted || !MainMapNative::CanOperate()) return;
         g_attempted = true; // No retry after timeout or uncertain engine acceptance.
         InspectExistingTerrain("initial-admitted-tick");
@@ -105,13 +91,13 @@ namespace
         }
         if (result != PLUGIN_PAK_OK || !g_pakHandle) return;
         MainMapNative::StrongObjectLease composeLease,presentLease;
-        auto* compose=InspectMaterial("/Game/Mods/MiniMap/Materials/M_BuildingCompose.M_BuildingCompose",
+        auto* compose=MainMapProof::LoadMaterial("/Game/Mods/MiniMap/Materials/M_BuildingCompose.M_BuildingCompose",
             SDK::EMaterialDomain::MD_Surface,composeLease);
         if (!MainMapNative::CanOperate()) return;
-        auto* present=InspectMaterial("/Game/Mods/MainMap/Materials/M_BuildingPresent.M_BuildingPresent",
+        auto* present=MainMapProof::LoadMaterial("/Game/Mods/MainMap/Materials/M_BuildingPresent.M_BuildingPresent",
             SDK::EMaterialDomain::MD_UI,presentLease);
         if(compose && present)
-            MainMapProof::ValidateAndMeasure(SDK::UWorld::GetWorld(),compose,present);
+            g_materialsReady=MainMapProof::ValidateAndMeasure(SDK::UWorld::GetWorld(),compose,present);
         LOG_WARN("MainMap A2.3: diagnostic operation finished; actual Slate/presentation/lifetime remain UNVERIFIED");
     }
 }
@@ -127,9 +113,10 @@ namespace MainMapRenderingProof
             !world->RegisterOnBeforeWorldEndPlay || !world->UnregisterOnBeforeWorldEndPlay ||
             !walker || !walker->IsReady || !walker->FindObjectsByClassNameInto) return false;
         if(!MainMapNative::InstallTerrainHooks(g_self,ObserveTerrainConstruct,ObserveTerrainDestruct)) return false;
-        LOG_INFO("MainMap A2.3: early terrain lifecycle observation ready; no persistent rendering owner attached");
+        LOG_INFO("MainMap A2.3B: early terrain lifecycle ready; BuildingLayer publication enabled after material proof");
         world->RegisterOnBeforeWorldEndPlay(BeforeWorldEnd);
         g_attempted = false;
+        g_materialsReady = false;
         g_pakHandle = 0;
         engine->RegisterOnTick(OnTick);
         g_registered = true;
@@ -138,6 +125,9 @@ namespace MainMapRenderingProof
 
     void Shutdown()
     {
+#ifdef MODLOADER_CLIENT_BUILD
+        MainMapBuildingLayer::Shutdown();
+#endif
         MainMapNative::RemoveTerrainHooks();
         LOG_INFO("MainMap A2.3: proof cleanup leases=%zu",MainMapNative::OutstandingLeaseCount());
         if (g_registered && g_self && g_self->hooks && g_self->hooks->Engine)

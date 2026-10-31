@@ -38,7 +38,7 @@ namespace
     HookHandle g_terrainDestructHook = nullptr;
     IPluginHookUtils* g_hooks = nullptr;
     MainMapNative::TerrainCallback g_afterTerrainConstruct = nullptr;
-    MainMapNative::TerrainCallback g_beforeTerrainDestruct = nullptr;
+    MainMapNative::TerrainDestructCallback g_beforeTerrainDestruct = nullptr;
 
     bool AdmitTerrainBoundary(const char* phase, SDK::UObject* terrain)
     {
@@ -62,8 +62,8 @@ namespace
     {
         // Base NativeDestruct is the original's first call; withdraw before it.
         const auto original=g_functions.originalTerrainDestruct;
-        if(AdmitTerrainBoundary("before-destruct",terrain) && g_beforeTerrainDestruct)
-            g_beforeTerrainDestruct(terrain);
+        const bool admitted=AdmitTerrainBoundary("before-destruct",terrain);
+        if(g_beforeTerrainDestruct) g_beforeTerrainDestruct(terrain,admitted);
         original(terrain);
     }
 
@@ -168,11 +168,12 @@ namespace MainMapNative
         return g_outstandingLeases;
     }
 
-    bool InstallTerrainHooks(IPluginSelf* self,TerrainCallback afterConstruct,TerrainCallback beforeDestruct)
+    bool InstallTerrainHooks(IPluginSelf* self,TerrainCallback afterConstruct,TerrainDestructCallback beforeDestruct)
     {
         // Installation is native code patching through the loader, not UObject
         // access. PluginInit is its supported boundary while engine-ready waits
-        // for plugins. Every actual object callback still requires CanOperate.
+        // for plugins. UObject access still requires CanOperate; a rejected
+        // destruct notification may only set an atomic cleanup request.
         if(!Available() || !self || !self->hooks || !self->hooks->Hooks ||
             !self->hooks->Hooks->Install || !self->hooks->Hooks->Remove ||
             !self->hooks->Hooks->IsInstalled || !afterConstruct || !beforeDestruct ||
@@ -206,7 +207,8 @@ namespace MainMapNative
         }
         g_terrainConstructHook=g_terrainDestructHook=nullptr;
         g_hooks=nullptr;
-        g_afterTerrainConstruct=g_beforeTerrainDestruct=nullptr;
+        g_afterTerrainConstruct=nullptr;
+        g_beforeTerrainDestruct=nullptr;
         g_functions.originalTerrainConstruct=g_functions.originalTerrainDestruct=nullptr;
     }
 

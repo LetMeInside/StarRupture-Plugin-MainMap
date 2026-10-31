@@ -16,6 +16,9 @@ namespace MainMapProof
         void End();
         SDK::FLinearColor Read(int x, int y);
         bool Check(const char* name, int x, int y, SDK::FLinearColor expected, float tolerance);
+        // Explicit retryable retirement for a persistent session. Rejection
+        // preserves the lease and context; the owner must remain alive.
+        bool Reset();
         SDK::UTextureRenderTarget2D* Get() const { return target_; }
         ~BuildingTarget();
     private:

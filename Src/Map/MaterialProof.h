@@ -11,7 +11,10 @@ namespace MainMapProof
         SDK::UMaterialInstanceDynamic* solidMid=nullptr;
         BuildingTarget target;
         bool submitted=false;
+        bool Reset();
     };
+    SDK::UMaterial* LoadMaterial(const char* path, SDK::EMaterialDomain expectedDomain,
+        MainMapNative::StrongObjectLease& lease);
     bool ValidateAndMeasure(SDK::UWorld* world, SDK::UMaterial* compose, SDK::UMaterial* present);
     bool BuildPresentationFrame(SDK::UWorld* world, SDK::UMaterial* compose, SDK::UMaterial* present,
         PresentationFrame& frame, bool alternate, bool rejectAfterBegin = false);
