@@ -1,0 +1,23 @@
+﻿# Visual Studio
+.vs/
+bin/
+obj/
+*.user
+*.suo
+*.VC.db
+*.VC.opendb
+
+# Unreal Engine generated files
+**/Binaries/
+**/Intermediate/
+**/Saved/
+**/DerivedDataCache/
+
+# Python
+__pycache__/
+*.pyc
+
+# Temporary files
+*.log
+*.tmp
+*.bak

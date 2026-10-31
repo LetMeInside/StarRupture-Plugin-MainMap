@@ -1,0 +1,202 @@
+{
+  "platform": "WindowsClient",
+  "container": "MainMapMaterials",
+  "shader_formats": [
+    "PCD3D_SM5",
+    "PCD3D_SM6"
+  ],
+  "shared_material_shader_code": false,
+  "files": [
+    {
+      "mount_path": "../../../StarRupture/Content/Mods/MiniMap/Materials/M_BuildingCompose.uasset",
+      "bytes": 3343,
+      "sha256": "58a9c58e93e78e5c3ed10e8ff9142a81d1f98d3f7579f2ad55e7fac2d1ef1f17",
+      "file": "StarRupture/Content/Mods/MiniMap/Materials/M_BuildingCompose.uasset"
+    },
+    {
+      "mount_path": "../../../StarRupture/Content/Mods/MiniMap/Materials/M_BuildingCompose.uexp",
+      "bytes": 68416,
+      "sha256": "06afd25a3bf03b3411d05176887316649cb206cb26618bcd0c4a6f97e27324b0",
+      "file": "StarRupture/Content/Mods/MiniMap/Materials/M_BuildingCompose.uexp"
+    },
+    {
+      "mount_path": "../../../StarRupture/Content/Mods/MainMap/Materials/M_BuildingPresent.uasset",
+      "bytes": 3082,
+      "sha256": "6436a4580fc24042e88ffa81186d920fc33012be04b076ef55d2a3a1ef72f465",
+      "file": "StarRupture/Content/Mods/MainMap/Materials/M_BuildingPresent.uasset"
+    },
+    {
+      "mount_path": "../../../StarRupture/Content/Mods/MainMap/Materials/M_BuildingPresent.uexp",
+      "bytes": 104305,
+      "sha256": "6beb7f696cd7c9d88020166c1c8b15893fae09b40f81a58b7e6e11301a021920",
+      "file": "StarRupture/Content/Mods/MainMap/Materials/M_BuildingPresent.uexp"
+    },
+    {
+      "mount_path": "../../../StarRupture/Content/Mods/MiniMap/Materials/T_ComposeDefault.uasset",
+      "bytes": 1068,
+      "sha256": "944f721ba889c749a104eb9bb0c35b3a998555bcfe5226ecf1c64a4e0ab06dc4",
+      "file": "StarRupture/Content/Mods/MiniMap/Materials/T_ComposeDefault.uasset"
+    },
+    {
+      "mount_path": "../../../StarRupture/Content/Mods/MiniMap/Materials/T_ComposeDefault.uexp",
+      "bytes": 422,
+      "sha256": "8b84e97620c7492c2ce580547d105da3c99b7e8d55b9e913038e7263e05eb82d",
+      "file": "StarRupture/Content/Mods/MiniMap/Materials/T_ComposeDefault.uexp"
+    },
+    {
+      "mount_path": "../../../StarRupture/Content/Mods/MainMap/Materials/T_PresentDefault.uasset",
+      "bytes": 1102,
+      "sha256": "657a0fe8531f2fa9ba933b39fd2803fd7cf0d66460a288dcba9061079d6cff66",
+      "file": "StarRupture/Content/Mods/MainMap/Materials/T_PresentDefault.uasset"
+    },
+    {
+      "mount_path": "../../../StarRupture/Content/Mods/MainMap/Materials/T_PresentDefault.uexp",
+      "bytes": 447,
+      "sha256": "3e87d23bedf84f58f0b44665a393f3598f04e2d0d84e4a3ca41b083a92c22b96",
+      "file": "StarRupture/Content/Mods/MainMap/Materials/T_PresentDefault.uexp"
+    }
+  ],
+  "cooked_package_summaries": [
+    {
+      "tag": 2653586369,
+      "legacy_file_version": -9,
+      "legacy_ue3_version": 864,
+      "file_version_ue4": 522,
+      "file_version_ue5": 1017,
+      "licensee_version": 0,
+      "package": "/Game/Mods/MiniMap/Materials/M_BuildingCompose"
+    },
+    {
+      "tag": 2653586369,
+      "legacy_file_version": -9,
+      "legacy_ue3_version": 864,
+      "file_version_ue4": 522,
+      "file_version_ue5": 1017,
+      "licensee_version": 0,
+      "package": "/Game/Mods/MainMap/Materials/M_BuildingPresent"
+    },
+    {
+      "tag": 2653586369,
+      "legacy_file_version": -9,
+      "legacy_ue3_version": 864,
+      "file_version_ue4": 522,
+      "file_version_ue5": 1017,
+      "licensee_version": 0,
+      "package": "/Game/Mods/MiniMap/Materials/T_ComposeDefault"
+    },
+    {
+      "tag": 2653586369,
+      "legacy_file_version": -9,
+      "legacy_ue3_version": 864,
+      "file_version_ue4": 522,
+      "file_version_ue5": 1017,
+      "licensee_version": 0,
+      "package": "/Game/Mods/MainMap/Materials/T_PresentDefault"
+    }
+  ],
+  "authored_inputs": [
+    {
+      "file": "StarRupture.uproject",
+      "bytes": 366,
+      "sha256": "fe0f27ed2071f5e1a2fb75702ea6b9fb732fb971f4fbc009d95f4e251334d663"
+    },
+    {
+      "file": "Config/DefaultEngine.ini",
+      "bytes": 1319,
+      "sha256": "ed26658d97e609a1b2cd819d823613452de9bf35ed045145a073227cb40e756b"
+    },
+    {
+      "file": "Config/DefaultGame.ini",
+      "bytes": 466,
+      "sha256": "2ba69d70cfaf291c3b6813720029c3dff61cc8b846d24b8fb39cbcb17a73d7db"
+    },
+    {
+      "file": "Content/Mods/MainMap/Materials/M_BuildingPresent.uasset",
+      "bytes": 7308,
+      "sha256": "313df58934f3b0915e5127a55f84995d4348728dc37c9cf711f72f5584399580"
+    },
+    {
+      "file": "Content/Mods/MainMap/Materials/T_PresentDefault.uasset",
+      "bytes": 10295,
+      "sha256": "de5c5b7ad269a32c94f7ce56dde7a48d7ff70889e9d021c16ebebb0bd817114a"
+    },
+    {
+      "file": "Content/Mods/MiniMap/Materials/M_BuildingCompose.uasset",
+      "bytes": 20592,
+      "sha256": "0bb3d9288eb0607c88fa3b4f387746186adbaef45b03fe7286a5342956eb6c8a"
+    },
+    {
+      "file": "Content/Mods/MiniMap/Materials/T_ComposeDefault.uasset",
+      "bytes": 10256,
+      "sha256": "10b83f2ad1ee2793a0687cf96b54edacd24bc77160ab23deb6a95a76b6497890"
+    }
+  ],
+  "engine_build": {
+    "MajorVersion": 5,
+    "MinorVersion": 6,
+    "PatchVersion": 1,
+    "Changelist": 44394996,
+    "CompatibleChangelist": 43139311,
+    "IsLicenseeVersion": 0,
+    "IsPromotedBuild": 1,
+    "BranchName": "++UE5+Release-5.6"
+  },
+  "resources": [
+    {
+      "id": 30101,
+      "file": "Resources/Materials/MainMapMaterials.pak",
+      "bytes": 7202,
+      "sha256": "4d0144c38abfc62750b6e3f59af28d4b4046e297b7fef18b60f42d0d5a069083"
+    },
+    {
+      "id": 30102,
+      "file": "Resources/Materials/MainMapMaterials.utoc",
+      "bytes": 801,
+      "sha256": "409e371964dc58c5fb48fe4b98daa7e85a997230817844c7e6fb8235b52d3c8b"
+    },
+    {
+      "id": 30103,
+      "file": "Resources/Materials/MainMapMaterials.ucas",
+      "bytes": 303936,
+      "sha256": "a10e083edd0ea4a422c35f9d8eb96df98d2a051d21777386c8ca147ec8eaf024"
+    }
+  ],
+  "provenance": "Accepted A2.2 saved assets and cooked outputs; external container filenames renamed only in A2.3R.",
+  "chunks": [
+    {
+      "PackageId": "0x8A1D6529FC9EAB8A",
+      "Filename": "../../../StarRupture/Content/Mods/MiniMap/Materials/T_ComposeDefault.uasset",
+      "Size": "1158",
+      "Hash": "0x06944ca22f4e0e682802aab8fe326314e48a507d",
+      "ChunkType": "ExportBundleData"
+    },
+    {
+      "PackageId": "0x5A6E64796B3C6045",
+      "Filename": "../../../StarRupture/Content/Mods/MiniMap/Materials/M_BuildingCompose.uasset",
+      "Size": "71467",
+      "Hash": "0x2065f7c4bf1f6cf51a617f89229e1f0b95252b43",
+      "ChunkType": "ExportBundleData"
+    },
+    {
+      "PackageId": "0xE936DA3DAB99F2B2",
+      "Filename": "../../../StarRupture/Content/Mods/MainMap/Materials/T_PresentDefault.uasset",
+      "Size": "1215",
+      "Hash": "0x50f3a561f85550643c9fade21c547f42ac10b74e",
+      "ChunkType": "ExportBundleData"
+    },
+    {
+      "PackageId": "0xC6DFF777D6BB8EF2",
+      "Filename": "../../../StarRupture/Content/Mods/MainMap/Materials/M_BuildingPresent.uasset",
+      "Size": "107148",
+      "Hash": "0x85d4f0a58f53c3067e21b951bdf88dd49812f17f",
+      "ChunkType": "ExportBundleData"
+    },
+    {
+      "PackageId": "0x694965C3BF095DF1",
+      "Filename": "<ContainerHeader>",
+      "Size": "176",
+      "Hash": "0x3a506978767b451b803e5e2f76a46d69ec4283cd",
+      "ChunkType": "ContainerHeader"
+    }
+  ]
+}

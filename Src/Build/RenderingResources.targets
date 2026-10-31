@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <MainMapResourceValidator>$(MSBuildThisFileDirectory)validate_rendering_resources.py</MainMapResourceValidator>
+    <MainMapResourceRoot>$(MSBuildThisFileDirectory)..\Resources\Materials\</MainMapResourceRoot>
+  </PropertyGroup>
+  <ItemGroup>
+    <MainMapRenderingInput Include="$(MainMapResourceRoot)MainMapMaterials.pak;$(MainMapResourceRoot)MainMapMaterials.utoc;$(MainMapResourceRoot)MainMapMaterials.ucas;$(MainMapResourceValidator);$(MSBuildThisFileDirectory)rendering-inputs.json;$(MSBuildThisFileDirectory)..\Content\Cook\material-baseline.json;$(MSBuildThisFileFullPath)" />
+    <UpToDateCheckInput Include="@(MainMapRenderingInput)" />
+  </ItemGroup>
+  <!-- Hash validation must run even when timestamps are preserved. VS must enter MSBuild. -->
+  <PropertyGroup>
+    <DisableFastUpToDateCheck>true</DisableFastUpToDateCheck>
+  </PropertyGroup>
+  <Target Name="ValidateMainMapRenderingInputs" BeforeTargets="ResourceCompile" >
+    <Exec WorkingDirectory="$(ProjectDir)" Command="python -B &quot;$(MainMapResourceValidator)&quot; --stamp &quot;$(IntDir)MainMapRenderingResources.digest.h&quot;" />
+  </Target>
+  <Target Name="ValidateMainMapLinkedRenderingResources" AfterTargets="Link" >
+    <Exec WorkingDirectory="$(ProjectDir)" Command="python -B &quot;$(MainMapResourceValidator)&quot; --dll &quot;$(TargetPath)&quot;" />
+  </Target>
+</Project>

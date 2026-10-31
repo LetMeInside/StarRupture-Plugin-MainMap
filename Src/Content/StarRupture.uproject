@@ -1,0 +1,12 @@
+{
+  "FileVersion": 3,
+  "EngineAssociation": "5.6",
+  "Category": "",
+  "Description": "Isolated MainMap A2.2 material authoring",
+  "Plugins": [
+    {"Name": "PythonScriptPlugin", "Enabled": true},
+    {"Name": "EditorScriptingUtilities", "Enabled": true},
+    {"Name": "GitSourceControl", "Enabled": false},
+    {"Name": "StudioTelemetry", "Enabled": false}
+  ]
+}
