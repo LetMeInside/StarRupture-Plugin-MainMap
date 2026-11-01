@@ -96,6 +96,7 @@
   <ItemGroup>
     <ClInclude Include="Config\Config.h" />
     <ClInclude Include="Map\BuildingLayer.h" />
+    <ClInclude Include="Map\BuildingComplexConsumer.h" />
     <ClInclude Include="Map\BuildingTarget.h" />
     <ClInclude Include="Map\MaterialProof.h" />
     <ClInclude Include="Map\RenderingProof.h" />
@@ -118,6 +119,13 @@
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="Map\BuildingLayer.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)' != 'Client Debug' And '$(Configuration)' != 'Client Release'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="Map\BuildingComplexConsumer.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)' != 'Client Debug' And '$(Configuration)' != 'Client Release'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="$(StarRuptureSDKSourceDir)CommonUI_functions.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)' != 'Client Debug' And '$(Configuration)' != 'Client Release'">true</ExcludedFromBuild>
+      <Visible>false</Visible>
     </ClCompile>
     <ClCompile Include="$(StarRuptureSDKSourceDir)UMG_functions.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)' != 'Client Debug' And '$(Configuration)' != 'Client Release'">true</ExcludedFromBuild>

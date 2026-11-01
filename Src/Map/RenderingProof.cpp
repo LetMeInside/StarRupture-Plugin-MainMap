@@ -9,6 +9,7 @@
 #endif
 #ifdef MODLOADER_CLIENT_BUILD
 #include "BuildingLayer.h"
+#include "BuildingComplexConsumer.h"
 #endif
 
 namespace
@@ -52,8 +53,13 @@ namespace
         return !g_miniMapSessionActive;
     }
 
-    void ReleaseMiniMapBuildingApi()
+    void ReleaseMiniMapBuildingApi(bool providerCallsAllowed)
     {
+        if(!providerCallsAllowed && g_miniMapSessionActive)
+        {
+            LOG_ERROR("MainMap: legacy MiniMap closure unresolved outside early shutdown; retaining ownership without provider calls");
+            return;
+        }
         if(!CloseMiniMapBuildingSession())
         {
             LOG_ERROR("ExternalMap: MiniMap session close was not admitted; retaining its module reference");
@@ -84,13 +90,19 @@ namespace
     void ObserveTerrainDestruct(SDK::UObject* terrain,bool admitted)
     {
 #ifdef MODLOADER_CLIENT_BUILD
-        if(MainMapBuildingLayer::TerrainDestruct(terrain,admitted))CloseMiniMapBuildingSession();
+        const bool closed=MainMapBuildingLayer::TerrainDestruct(terrain,admitted);
+        if(closed || !admitted)MainMapBuildingComplex::RequestClose();
+        if(admitted)MainMapBuildingComplex::ServiceClose();
+        if(closed)CloseMiniMapBuildingSession();
 #endif
     }
     void BeforeWorldEnd(SDK::UWorld* world,const char*)
     {
 #ifdef MODLOADER_CLIENT_BUILD
-        if(MainMapBuildingLayer::BeforeWorldEnd(world))CloseMiniMapBuildingSession();
+        const bool closed=MainMapBuildingLayer::BeforeWorldEnd(world);
+        if(closed || !MainMapNative::IsGameThread())MainMapBuildingComplex::RequestClose();
+        if(MainMapNative::CanOperate())MainMapBuildingComplex::ServiceClose();
+        if(closed)CloseMiniMapBuildingSession();
 #endif
     }
 
@@ -98,6 +110,7 @@ namespace
     {
 #ifdef MODLOADER_CLIENT_BUILD
         MainMapBuildingLayer::Tick(g_materialsReady);
+        MainMapBuildingComplex::Tick();
         if(!MainMapNative::CanOperate())return;
         if(!MainMapBuildingLayer::HasActiveTerrainSession())CloseMiniMapBuildingSession();
         else ServiceMiniMapBuildingSession(delta);
@@ -160,6 +173,7 @@ namespace MainMapRenderingProof
         }
         if(!MainMapNative::InstallTerrainHooks(g_self,ObserveTerrainConstruct,ObserveTerrainDestruct)) return false;
         DiscoverMiniMapBuildingApi(); // Optional dependency; ExternalMap initialization remains independent.
+        MainMapBuildingComplex::Initialize();
         world->RegisterOnBeforeWorldEndPlay(BeforeWorldEnd);
         g_resourceSetupAttempted = false;
         g_materialsReady = false;
@@ -169,10 +183,11 @@ namespace MainMapRenderingProof
         return true;
     }
 
-    void Shutdown()
+    void Shutdown(bool earlyEngineShutdown)
     {
 #ifdef MODLOADER_CLIENT_BUILD
-        ReleaseMiniMapBuildingApi();
+        MainMapBuildingComplex::Shutdown(earlyEngineShutdown);
+        ReleaseMiniMapBuildingApi(earlyEngineShutdown);
         MainMapBuildingLayer::Shutdown();
 #endif
         MainMapNative::RemoveTerrainHooks();

@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <new>
+#include <limits>
 
 static_assert(sizeof(SDK::FGeometry)==0x38);
 static_assert(sizeof(SDK::FAnchors)==0x20);
@@ -21,6 +22,8 @@ namespace
     {
         MainMapNative::StrongObjectLease terrain,world,canvas,image;
         MainMapNative::StrongObjectLease composeParent,presentParent;
+        MainMapNative::StrongObjectLease owningMenu;
+        uint64_t epoch=0;
         MainMapProof::PresentationFrame frame;
         bool attached=false;
         bool brushBound=false;
@@ -69,6 +72,7 @@ namespace
     // If final teardown rejects release, leave the bookkeeping intact and log
     // it rather than running lease destructors after native admission closes.
     Session* g_session=nullptr;
+    uint64_t g_nextConsumerEpoch=1;
     std::atomic_bool g_cleanupRequested{false};
     std::atomic_bool g_stopping{false};
 
@@ -182,7 +186,8 @@ namespace
         // owner, including any not-yet-reset leases, for the next admitted tick.
         if (!session.image.Reset() || !session.frame.Reset() ||
             !session.presentParent.Reset() || !session.composeParent.Reset() ||
-            !session.canvas.Reset() || !session.terrain.Reset() || !session.world.Reset())
+            !session.owningMenu.Reset() || !session.canvas.Reset() ||
+            !session.terrain.Reset() || !session.world.Reset())
         {
             LOG_WARN("MainMap: session resource release deferred; ownership retained");
             return false;
@@ -214,6 +219,50 @@ namespace
 
 namespace MainMapBuildingLayer
 {
+    bool TryGetConsumerContext(ConsumerContext& out)
+    {
+        out={};
+        if(!MainMapNative::CanOperate() || !HasActiveTerrainSession() ||
+            g_cleanupRequested.load())return false;
+        auto& session=*g_session;
+        auto* terrain=static_cast<SDK::UCrUW_MapMenuTerrain*>(session.terrain.Get());
+        auto* world=static_cast<SDK::UWorld*>(session.world.Get());
+        if(!terrain || !world || world!=SDK::UWorld::GetWorld() ||
+            !IsInstance(world) || !IsInstance(terrain))return false;
+        auto* treeObject=terrain->Outer;
+        if(!treeObject || !IsInstance(treeObject) || !treeObject->IsA(SDK::UWidgetTree::StaticClass()))return false;
+        auto* tree=static_cast<SDK::UWidgetTree*>(treeObject);
+        auto* areaObject=tree->Outer;
+        if(!areaObject || !IsInstance(areaObject) || !areaObject->IsA(SDK::UWBP_MapMenuMapArea_C::StaticClass()))return false;
+        auto* area=static_cast<SDK::UCrUW_MapMenuMapArea*>(areaObject);
+        if(area->WidgetTree!=tree || area->MapMenuTerrain!=terrain ||
+            !area->CanvasPanelMapArea || !IsInstance(area->CanvasPanelMapArea) ||
+            !area->CanvasPanelMapArea->IsA(SDK::UCanvasPanel::StaticClass()) ||
+            terrain->GetParent()!=area->CanvasPanelMapArea)return false;
+        auto* menuTreeObject=area->Outer;
+        if(!menuTreeObject || !IsInstance(menuTreeObject) || !menuTreeObject->IsA(SDK::UWidgetTree::StaticClass()))return false;
+        auto* menuTree=static_cast<SDK::UWidgetTree*>(menuTreeObject);
+        auto* menuObject=menuTree->Outer;
+        if(!menuObject || !IsInstance(menuObject) || !menuObject->IsA(SDK::UCrUW_MapMenu::StaticClass()))return false;
+        auto* menu=static_cast<SDK::UCrUW_MapMenu*>(menuObject);
+        if(menu->WidgetTree!=menuTree || menu->MapMenuMapArea!=area)return false;
+        if(session.owningMenu.Get() && session.owningMenu.Get()!=menu)return false;
+        if(!session.owningMenu.Get() && !session.owningMenu.Acquire(menu))return false;
+        if(!menu->IsActivated())return false;
+        // Activation is separate from layout availability. Phase 1 opens only
+        // metadata ownership; Phase 2 must also validate clipped geometry/materials.
+        for(auto* widget=static_cast<SDK::UWidget*>(terrain);widget;widget=widget->GetParent())
+            if(!IsInstance(widget) || !widget->IsVisible() || !widget->IsRendered())return false;
+        if(!menu->IsVisible() || !menu->IsRendered() || !area->IsVisible() || !area->IsRendered())return false;
+        auto* settings=SDK::UCrMapMenuDevSettings::GetDefaultObj();
+        auto* data=settings?settings->TerrainData.Get():nullptr;
+        if(!data || !IsInstance(data) || !data->IsA(SDK::UCrMapMenuTerrainData::StaticClass()))return false;
+        const double x=data->MapTerrainTopLeftPivotPoint.X,y=data->MapTerrainTopLeftPivotPoint.Y;
+        if(!std::isfinite(x) || !std::isfinite(y))return false;
+        out={world,session.epoch,x,y};
+        return true;
+    }
+
     bool TryGetVisibleWorldRect(WorldRect& out)
     {
         return TryGetVisibleWorldRectImpl(out);
@@ -275,6 +324,7 @@ namespace MainMapBuildingLayer
             LOG_ERROR("MainMap A2.3B: terrain=%p tree/canvas/owning-player world validation FAILED",terrain);
             return;
         }
+        if(g_nextConsumerEpoch==(std::numeric_limits<uint64_t>::max)())return;
         g_session=new(std::nothrow) Session;
         if (!g_session)
         {
@@ -282,6 +332,7 @@ namespace MainMapBuildingLayer
             return;
         }
         auto& session=*g_session;
+        session.epoch=g_nextConsumerEpoch++;
         if (!session.terrain.Acquire(terrain) || !session.world.Acquire(world) || !session.canvas.Acquire(canvas))
         {
             Reject("terrain/world/canvas retention");

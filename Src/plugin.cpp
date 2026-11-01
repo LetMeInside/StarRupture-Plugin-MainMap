@@ -20,7 +20,7 @@ namespace
     void OnEngineShutdown()
     {
         g_engineShutdownSeen = true;
-        MainMapRenderingProof::Shutdown();
+        MainMapRenderingProof::Shutdown(true);
         MainMapNative::BeginShutdown(true);
         if (!MainMapNative::Shutdown())
             LOG_ERROR("MainMap: UObject leases remained at engine shutdown");

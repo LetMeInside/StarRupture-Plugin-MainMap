@@ -3,5 +3,5 @@
 namespace MainMapRenderingProof
 {
     bool Initialize();
-    void Shutdown();
+    void Shutdown(bool earlyEngineShutdown=false);
 }
