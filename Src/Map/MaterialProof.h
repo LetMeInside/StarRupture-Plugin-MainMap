@@ -5,9 +5,10 @@ namespace MainMapProof
 {
     struct PresentationFrame final
     {
-        MainMapNative::StrongObjectLease composeMidLease,presentMidLease;
+        MainMapNative::StrongObjectLease composeMidLease,solidMidLease,presentMidLease;
         SDK::UMaterialInstanceDynamic* composeMid=nullptr;
         SDK::UMaterialInstanceDynamic* presentMid=nullptr;
+        SDK::UMaterialInstanceDynamic* solidMid=nullptr;
         BuildingTarget target;
         bool Reset();
     };

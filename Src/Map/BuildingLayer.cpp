@@ -26,9 +26,9 @@ namespace
         bool brushBound=false;
         bool published=false;
         bool closing=false;
+        SDK::FMargin visibleLocal{};
     };
 
-    struct WorldRect final { double minX,minY,maxX,maxY; };
     struct Rect final { double minX=0,minY=0,maxX=0,maxY=0; };
     struct Point final { double x=0,y=0; };
 
@@ -82,7 +82,7 @@ namespace
         return object==nullptr;
     }
 
-    bool TryGetVisibleWorldRect(WorldRect& out)
+    bool TryGetVisibleWorldRectImpl(MainMapBuildingLayer::WorldRect& out)
     {
         if(!MainMapNative::CanOperate()||!g_session||g_session->closing) return false;
         auto& session=*g_session;
@@ -148,11 +148,13 @@ namespace
         if(!terrainData||!IsInstance(terrainData)||!terrainData->IsA(SDK::UCrMapMenuTerrainData::StaticClass())) return false;
         const double originX=terrainData->MapTerrainTopLeftPivotPoint.X;
         const double originY=terrainData->MapTerrainTopLeftPivotPoint.Y;
-        WorldRect result{originX+localBounds.minX*100.0,originY+localBounds.minY*100.0,
+        MainMapBuildingLayer::WorldRect result{originX+localBounds.minX*100.0,originY+localBounds.minY*100.0,
             originX+localBounds.maxX*100.0,originY+localBounds.maxY*100.0};
         if(!std::isfinite(result.minX)||!std::isfinite(result.minY)||
             !std::isfinite(result.maxX)||!std::isfinite(result.maxY)||
             result.maxX<=result.minX||result.maxY<=result.minY) return false;
+        session.visibleLocal={static_cast<float>(localBounds.minX),static_cast<float>(localBounds.minY),
+            static_cast<float>(localBounds.maxX-localBounds.minX),static_cast<float>(localBounds.maxY-localBounds.minY)};
         out=result;
         return true;
     }
@@ -212,6 +214,39 @@ namespace
 
 namespace MainMapBuildingLayer
 {
+    bool TryGetVisibleWorldRect(WorldRect& out)
+    {
+        return TryGetVisibleWorldRectImpl(out);
+    }
+
+    MiniMapBuildingAbiResult RenderBuildings(MiniMapBuildingRenderFn render,float delta,MiniMapBuildingRenderStatus& status)
+    {
+        WorldRect visible{};
+        if(!render || !MainMapNative::CanOperate() || !g_session || !g_session->published ||
+            !TryGetVisibleWorldRect(visible))return MINIMAP_BUILDING_ABI_UNAVAILABLE;
+        auto& session=*g_session;
+        auto* image=static_cast<SDK::UImage*>(session.image.Get());
+        auto* slot=static_cast<SDK::UCanvasPanelSlot*>(image->Slot);
+        // The texture represents the clipped visible rectangle, not the entire
+        // panned/zoomed terrain. Reuse the helper's terrain-local rectangle.
+        slot->SetAnchors({{0,0},{0,0}});
+        slot->SetOffsets(session.visibleLocal);
+        if(!session.frame.target.Begin())return MINIMAP_BUILDING_ABI_UNAVAILABLE;
+        struct EndPass { MainMapProof::BuildingTarget& Target; ~EndPass(){Target.End();} } end{session.frame.target};
+        MiniMapBuildingRenderRequest request{};
+        request.StructSize=sizeof(request);request.DeltaSeconds=delta;
+        request.Rectangle={visible.minX,visible.minY,visible.maxX,visible.maxY};
+        request.World=static_cast<SDK::UWorld*>(session.world.Get());
+        request.Destination=session.frame.target.Get();request.Canvas=session.frame.target.Canvas();
+        request.SpriteMaterial=session.frame.composeMid;request.SolidMaterial=session.frame.solidMid;
+        return render(&request,&status);
+    }
+
+    bool HasActiveTerrainSession()
+    {
+        return g_session && !g_session->closing && !g_stopping.load();
+    }
+
     void TerrainConstruct(SDK::UObject* object)
     {
         if (g_stopping.load() || !MainMapNative::CanOperate()) return;
@@ -270,15 +305,20 @@ namespace MainMapBuildingLayer
         // post-engine tick prepares one frame after resources/layout are ready.
     }
 
-    void TerrainDestruct(SDK::UObject* terrain,bool admitted)
+    bool TerrainDestruct(SDK::UObject* terrain,bool admitted)
     {
         if (!admitted)
         {
             // May be called off GT. No receiver dereference or owner access.
             g_cleanupRequested.store(true);
-            return;
+            return false;
         }
-        if (g_session && g_session->terrain.Get()==terrain) Close("terrain destruct before original");
+        if (g_session && g_session->terrain.Get()==terrain)
+        {
+            Close("terrain destruct before original");
+            return true;
+        }
+        return false;
     }
 
     void Tick(bool materialsReady)
@@ -289,6 +329,7 @@ namespace MainMapBuildingLayer
         if (g_session->closing) { Cleanup(); return; }
         if (g_stopping.load()) return;
         auto& session=*g_session;
+        if(session.world.Get()!=SDK::UWorld::GetWorld()) {Close("world replacement");return;}
         auto* terrain=static_cast<SDK::UCrUW_MapMenuTerrain*>(session.terrain.Get());
         auto* canvas=static_cast<SDK::UCanvasPanel*>(session.canvas.Get());
         auto* image=static_cast<SDK::UImage*>(session.image.Get());
@@ -345,15 +386,20 @@ namespace MainMapBuildingLayer
         session.published=true;
     }
 
-    void BeforeWorldEnd(SDK::UWorld* world)
+    bool BeforeWorldEnd(SDK::UWorld* world)
     {
         if (!MainMapNative::IsGameThread())
         {
             g_cleanupRequested.store(true);
             LOG_WARN("MainMap A2.3B: world-end cleanup deferred off GT");
-            return;
+            return false;
         }
-        if (g_session && g_session->world.Get()==world) Close("world end");
+        if (g_session && g_session->world.Get()==world)
+        {
+            Close("world end");
+            return true;
+        }
+        return false;
     }
 
     void Shutdown()

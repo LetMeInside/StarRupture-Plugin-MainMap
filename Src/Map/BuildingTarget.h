@@ -16,6 +16,7 @@ namespace MainMapProof
         // Explicit retryable retirement for a persistent session. Rejection
         // preserves the lease and context; the owner must remain alive.
         bool Reset();
+        SDK::UCanvas* Canvas() const { return begun_ ? canvas_ : nullptr; }
         SDK::UTextureRenderTarget2D* Get() const { return target_; }
         ~BuildingTarget();
     private:

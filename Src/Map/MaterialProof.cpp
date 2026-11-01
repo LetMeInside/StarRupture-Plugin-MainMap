@@ -11,6 +11,8 @@ namespace MainMapProof
         // relinquish their references. Every failed reset remains retryable.
         if (!presentMidLease.Reset()) return false;
         presentMid=nullptr;
+        if (!solidMidLease.Reset()) return false;
+        solidMid=nullptr;
         if (!composeMidLease.Reset()) return false;
         composeMid=nullptr;
         return target.Reset();
@@ -50,6 +52,11 @@ namespace MainMapProof
         auto* mid=SDK::UKismetMaterialLibrary::CreateDynamicMaterialInstance(world,compose,{},SDK::EMIDCreationFlags::None);
         if(!mid || !frame.composeMidLease.Acquire(mid)) return false;
         composeMid=mid;
+        // Same compose parent, separate immutable white sampler for spline fills.
+        // Never rebind a MID between queued sprite and spline draws.
+        mid=SDK::UKismetMaterialLibrary::CreateDynamicMaterialInstance(world,compose,{},SDK::EMIDCreationFlags::None);
+        if(!mid || !frame.solidMidLease.Acquire(mid))return false;
+        frame.solidMid=mid;
         mid=SDK::UKismetMaterialLibrary::CreateDynamicMaterialInstance(world,present,{},SDK::EMIDCreationFlags::None);
         if(!mid || !frame.presentMidLease.Acquire(mid)) return false;
         presentMid=mid;

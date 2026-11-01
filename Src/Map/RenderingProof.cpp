@@ -19,7 +19,7 @@ namespace
     PluginPakHandle g_pakHandle = 0;
 #ifdef MODLOADER_CLIENT_BUILD
     HMODULE g_miniMapModule=nullptr;
-    MiniMapBuildingSessionApiV1 g_miniMapBuildingApi{};
+    MiniMapBuildingSessionApi g_miniMapBuildingApi{};
     bool g_miniMapSessionActive=false;
 
     void DiscoverMiniMapBuildingApi()
@@ -28,12 +28,11 @@ namespace
         if(!GetModuleHandleExW(0,L"MiniMap.dll",&module))return;
         auto entry=reinterpret_cast<decltype(&MiniMap_GetBuildingSessionApi)>(
             GetProcAddress(module,"MiniMap_GetBuildingSessionApi"));
-        MiniMapBuildingSessionApiV1 api{};
+        MiniMapBuildingSessionApi api{};
         api.StructSize=sizeof(api);
         if(!entry || entry(MINIMAP_BUILDING_SESSION_ABI_VERSION,&api)!=MINIMAP_BUILDING_ABI_OK ||
             api.Version!=MINIMAP_BUILDING_SESSION_ABI_VERSION ||
-            (api.Capabilities&MINIMAP_BUILDING_ABI_CAP_SESSION)==0 ||
-            !api.OpenSession || !api.UpdateWorldRectangle || !api.Service || !api.ReadStatus || !api.CloseSession)
+            !api.Render || !api.Close)
         {
             FreeLibrary(module);
             return;
@@ -45,8 +44,11 @@ namespace
     bool CloseMiniMapBuildingSession()
     {
         if(!g_miniMapSessionActive)return true;
-        const auto result=g_miniMapBuildingApi.CloseSession();
-        if(result==MINIMAP_BUILDING_ABI_OK)g_miniMapSessionActive=false;
+        const auto result=g_miniMapBuildingApi.Close();
+        if(result==MINIMAP_BUILDING_ABI_OK)
+        {
+            g_miniMapSessionActive=false;
+        }
         return !g_miniMapSessionActive;
     }
 
@@ -61,6 +63,17 @@ namespace
         if(g_miniMapModule)FreeLibrary(g_miniMapModule);
         g_miniMapModule=nullptr;
     }
+
+    void ServiceMiniMapBuildingSession(float delta)
+    {
+        if(!g_miniMapBuildingApi.Render || !MainMapNative::CanOperate())return;
+        // A rejected invocation may already have acquired provider ownership.
+        // Only explicit successful Close is an ownership acknowledgement.
+        g_miniMapSessionActive=true;
+        MiniMapBuildingRenderStatus status{};status.StructSize=sizeof(status);
+        MainMapBuildingLayer::RenderBuildings(g_miniMapBuildingApi.Render,delta,status);
+    }
+
 #endif
     void ObserveTerrainConstruct(SDK::UObject* terrain)
     {
@@ -71,15 +84,13 @@ namespace
     void ObserveTerrainDestruct(SDK::UObject* terrain,bool admitted)
     {
 #ifdef MODLOADER_CLIENT_BUILD
-        if(admitted)CloseMiniMapBuildingSession();
-        MainMapBuildingLayer::TerrainDestruct(terrain,admitted);
+        if(MainMapBuildingLayer::TerrainDestruct(terrain,admitted))CloseMiniMapBuildingSession();
 #endif
     }
     void BeforeWorldEnd(SDK::UWorld* world,const char*)
     {
 #ifdef MODLOADER_CLIENT_BUILD
-        CloseMiniMapBuildingSession();
-        MainMapBuildingLayer::BeforeWorldEnd(world);
+        if(MainMapBuildingLayer::BeforeWorldEnd(world))CloseMiniMapBuildingSession();
 #endif
     }
 
@@ -87,8 +98,9 @@ namespace
     {
 #ifdef MODLOADER_CLIENT_BUILD
         MainMapBuildingLayer::Tick(g_materialsReady);
-        if(g_miniMapSessionActive && MainMapNative::CanOperate() && g_miniMapBuildingApi.Service(delta)!=MINIMAP_BUILDING_ABI_OK)
-            g_miniMapSessionActive=false;
+        if(!MainMapNative::CanOperate())return;
+        if(!MainMapBuildingLayer::HasActiveTerrainSession())CloseMiniMapBuildingSession();
+        else ServiceMiniMapBuildingSession(delta);
 #endif
         if (g_resourceSetupAttempted || !MainMapNative::CanOperate()) return;
         g_resourceSetupAttempted = true; // Mount acceptance is intentionally attempted once.
