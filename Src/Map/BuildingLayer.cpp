@@ -268,6 +268,51 @@ namespace MainMapBuildingLayer
         return TryGetVisibleWorldRectImpl(out);
     }
 
+    bool TryGetGroupedTilePixelSpan(double& out)
+    {
+        out=0;
+        if(!MainMapNative::CanOperate() || !g_session || g_session->closing)return false;
+        auto* terrain=static_cast<SDK::UCrUW_MapMenuTerrain*>(g_session->terrain.Get());
+        auto* world=static_cast<SDK::UWorld*>(g_session->world.Get());
+        if(!terrain || !world || world!=SDK::UWorld::GetWorld())return false;
+        const auto geometry=terrain->GetPaintSpaceGeometry();
+        Rect supported{};
+        if(!GeometryRect(geometry,supported))return false;
+        // Verify the live viewport root convention instead of treating Slate
+        // absolute units as pixels or assuming a retained design resolution.
+        const auto root=SDK::UWidgetLayoutLibrary::GetViewportWidgetGeometry(world);
+        const auto rootSize=SDK::USlateBlueprintLibrary::GetLocalSize(root);
+        const auto outputSize=SDK::UWidgetLayoutLibrary::GetViewportSize(world);
+        SDK::FVector2D rootMin{},rootMax{},unused{};
+        SDK::USlateBlueprintLibrary::LocalToViewport(world,root,{0,0},&rootMin,&unused);
+        SDK::USlateBlueprintLibrary::LocalToViewport(world,root,rootSize,&rootMax,&unused);
+        if(!std::isfinite(rootSize.X)||!std::isfinite(rootSize.Y)||rootSize.X<=0||rootSize.Y<=0||
+            !std::isfinite(outputSize.X)||!std::isfinite(outputSize.Y)||outputSize.X<=0||outputSize.Y<=0||
+            !std::isfinite(rootMin.X)||!std::isfinite(rootMin.Y)||!std::isfinite(rootMax.X)||!std::isfinite(rootMax.Y)||
+            std::abs(rootMin.X)>kGeometryEpsilon||std::abs(rootMin.Y)>kGeometryEpsilon||
+            std::abs(rootMax.X-outputSize.X)>kGeometryEpsilon*outputSize.X||
+            std::abs(rootMax.Y-outputSize.Y)>kGeometryEpsilon*outputSize.Y)return false;
+        // PixelPosition is viewport output pixels; ViewportPosition is widget
+        // space. Do not multiply by a second viewport/DPI scale.
+        SDK::FVector2D pixels[4]{},viewport{};
+        const SDK::FVector2D local[4]={{0,0},{500,0},{0,500},{500,500}};
+        for(int i=0;i<4;++i)
+        {
+            SDK::USlateBlueprintLibrary::LocalToViewport(world,geometry,local[i],&pixels[i],&viewport);
+            if(!std::isfinite(pixels[i].X)||!std::isfinite(pixels[i].Y))return false;
+        }
+        const double xx=pixels[1].X-pixels[0].X,xy=pixels[1].Y-pixels[0].Y;
+        const double yx=pixels[2].X-pixels[0].X,yy=pixels[2].Y-pixels[0].Y;
+        const double x=std::hypot(xx,xy),y=std::hypot(yx,yy);
+        if(!std::isfinite(x)||!std::isfinite(y)||x<=0||y<=0 ||
+            std::abs(x-y)>kGeometryEpsilon*(std::max)(x,y) ||
+            std::abs(xx*yx+xy*yy)>kGeometryEpsilon*x*y ||
+            std::abs(pixels[3].X-pixels[0].X-xx-yx)>kGeometryEpsilon ||
+            std::abs(pixels[3].Y-pixels[0].Y-xy-yy)>kGeometryEpsilon)return false;
+        out=(std::max)(x,y);
+        return true;
+    }
+
     MiniMapBuildingAbiResult RenderBuildings(MiniMapBuildingRenderFn render,float delta,MiniMapBuildingRenderStatus& status)
     {
         WorldRect visible{};

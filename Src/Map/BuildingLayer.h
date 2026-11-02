@@ -25,6 +25,8 @@ namespace MainMapBuildingLayer
     bool BeforeWorldEnd(SDK::UWorld* world);
     bool HasActiveTerrainSession();
     bool TryGetVisibleWorldRect(WorldRect& out);
+    // Device-pixel length of a 500 m tile under the current terrain geometry.
+    bool TryGetGroupedTilePixelSpan(double& out);
 #ifdef MODLOADER_CLIENT_BUILD
     MiniMapBuildingAbiResult RenderBuildings(MiniMapBuildingRenderFn render,float delta,MiniMapBuildingRenderStatus& status);
 #endif
