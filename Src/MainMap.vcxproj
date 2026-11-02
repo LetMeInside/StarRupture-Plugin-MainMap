@@ -97,7 +97,6 @@
     <ClInclude Include="Config\Config.h" />
     <ClInclude Include="Map\BuildingLayer.h" />
     <ClInclude Include="Map\BuildingComplexConsumer.h" />
-    <ClInclude Include="Map\BuildingTarget.h" />
     <ClInclude Include="Map\MaterialProof.h" />
     <ClInclude Include="Map\RenderingProof.h" />
     <ClInclude Include="Native\Fingerprints.h" />
@@ -132,9 +131,6 @@
       <Visible>false</Visible>
     </ClCompile>
     <ClCompile Include="Config\Config.cpp" />
-    <ClCompile Include="Map\BuildingTarget.cpp">
-      <ExcludedFromBuild Condition="'$(Configuration)' != 'Client Debug' And '$(Configuration)' != 'Client Release'">true</ExcludedFromBuild>
-    </ClCompile>
     <ClCompile Include="Map\MaterialProof.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)' != 'Client Debug' And '$(Configuration)' != 'Client Release'">true</ExcludedFromBuild>
     </ClCompile>

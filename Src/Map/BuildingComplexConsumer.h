@@ -5,7 +5,8 @@ namespace MainMapBuildingComplex
     // Startup-loaded MiniMap only. Runtime load/unload/reload is unsupported;
     // the current ModLoader does not enforce the future RESTART policy.
     void Initialize();
-    void Tick();
+    void Tick(bool materialContainerMounted, bool mainMapVisible);
+    void SetPresentationVisible(bool visible);
     // Notification-only; safe when native/GT admission is rejected.
     void RequestClose();
     void ServiceClose();

@@ -2,6 +2,8 @@
 
 This directory contains the source authoring and candidate-cook tools. The BCT1 source and five-package material inventory are accepted. A newly cooked candidate remains separate from the accepted resource triplet until its three container files and pins are promoted together.
 
+MainMap now uses only `M_BuildingComplexPresent` at runtime. The accepted baseline, authored legacy material sources, and embedded `MainMapMaterials` triplet still include `M_BuildingCompose`, `M_BuildingPresent`, `T_ComposeDefault`, and `T_PresentDefault`. Removing those packages from production requires a separately reviewed Unreal cook and IoStore repackaging pass, followed by updating the accepted resource inventory and embedded-resource digest. That packaging has not been performed; do not hand-edit the accepted hashes or substitute an improvised container.
+
 ## Verified toolchain and boundaries
 
 The verified toolchain is stock Unreal Engine 5.6.1, CL 44394996 (compatible CL 43139311), installed at `C:\Program Files\Epic Games\UE_5.6`, plus Python 3.12.10 at `C:\Users\Karel\AppData\Local\Programs\Python\Python312\python.exe`. `build_materials.py` checks the exact UE Build.version against `material-baseline.json` and stops on mismatch. Run Unreal authoring and cooking from an unrestricted process-launch context; the prior sandboxed invocations exited silently without initializing the project. Do not weaken the hash gates to accommodate a mismatch.

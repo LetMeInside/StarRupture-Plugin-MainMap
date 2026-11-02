@@ -1,10 +1,8 @@
 #pragma once
 #include <cstdint>
-#ifdef MODLOADER_CLIENT_BUILD
-#include "..\..\..\..\MiniMap\Solution\Src\Map\Buildings\ExternalMapBuildingSessionAbi.h"
-#endif
 
 namespace SDK { class UObject; class UWorld; }
+namespace SDK { class UCanvasPanel; class UWidgetTree; }
 
 namespace MainMapBuildingLayer
 {
@@ -17,18 +15,23 @@ namespace MainMapBuildingLayer
         double originX=0,originY=0;
     };
     bool TryGetConsumerContext(ConsumerContext& out);
+    // Borrowed from the active terrain session; callers retain every UObject
+    // they keep beyond this call. The tree is the established SpawnObject Outer.
+    bool TryGetTilePresentationContext(SDK::UCanvasPanel*& canvas, SDK::UWidgetTree*& tree);
 
     void TerrainConstruct(SDK::UObject* terrain);
     // If not admitted, this only requests cleanup; it never touches UObjects.
     bool TerrainDestruct(SDK::UObject* terrain, bool admitted);
-    void Tick(bool materialsReady);
+    void Tick();
+    // ChimeraMain callback identity; does not dereference or retain the world.
+    void WorldBeginPlay(SDK::UWorld* world);
     bool BeforeWorldEnd(SDK::UWorld* world);
     bool HasActiveTerrainSession();
+    // Reads the active map menu's activation and visibility state through the
+    // validated terrain context; a terrain session alone is not visibility.
+    bool IsMainMapVisible();
     bool TryGetVisibleWorldRect(WorldRect& out);
     // Device-pixel length of a 500 m tile under the current terrain geometry.
     bool TryGetGroupedTilePixelSpan(double& out);
-#ifdef MODLOADER_CLIENT_BUILD
-    MiniMapBuildingAbiResult RenderBuildings(MiniMapBuildingRenderFn render,float delta,MiniMapBuildingRenderStatus& status);
-#endif
     void Shutdown();
 }

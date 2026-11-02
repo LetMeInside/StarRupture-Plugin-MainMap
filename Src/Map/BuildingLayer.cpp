@@ -1,5 +1,5 @@
 #include "BuildingLayer.h"
-#include "MaterialProof.h"
+#include "Native/NativeApi.h"
 #include "ChimeraUI_classes.hpp"
 #include "WBP_MapMenuMapArea_classes.hpp"
 #include "UMG_classes.hpp"
@@ -20,16 +20,14 @@ namespace
 {
     struct Session final
     {
-        MainMapNative::StrongObjectLease terrain,world,canvas,image;
-        MainMapNative::StrongObjectLease composeParent,presentParent;
+        MainMapNative::StrongObjectLease terrain,world,canvas;
         MainMapNative::StrongObjectLease owningMenu;
         uint64_t epoch=0;
-        MainMapProof::PresentationFrame frame;
-        bool attached=false;
-        bool brushBound=false;
-        bool published=false;
         bool closing=false;
-        SDK::FMargin visibleLocal{};
+        uint64_t diagnosticTickBlocks=0;
+        uint64_t diagnosticContextRejections=0;
+        uint64_t diagnosticCleanupDeferrals=0;
+        const char* closingReason=nullptr;
     };
 
     struct Rect final { double minX=0,minY=0,maxX=0,maxY=0; };
@@ -73,8 +71,30 @@ namespace
     // it rather than running lease destructors after native admission closes.
     Session* g_session=nullptr;
     uint64_t g_nextConsumerEpoch=1;
-    std::atomic_bool g_cleanupRequested{false};
+    std::atomic<const char*> g_cleanupRequestedReason{nullptr};
     std::atomic_bool g_stopping{false};
+    // Lifecycle identity only; never dereferenced or used as a UObject lease.
+    std::atomic<SDK::UWorld*> g_gameplayWorld{nullptr};
+    uint64_t g_contextWithoutSession=0;
+    uint64_t g_tickWithoutAdmission=0;
+
+    void RequestCleanup(const char* reason)
+    {
+        const char* expected=nullptr;
+        g_cleanupRequestedReason.compare_exchange_strong(expected,reason);
+    }
+
+    void LogSessionGate(uint64_t& seen,unsigned gate,const char* category,
+        const Session* session,const char* reason)
+    {
+        if(gate>=64)return;
+        const uint64_t bit=uint64_t{1}<<gate;
+        if(seen&bit)return;
+        seen|=bit;
+        LOG_INFO("MainMap diagnostics: %s epoch=%llu world=%p gate=%s",category,
+            static_cast<unsigned long long>(session?session->epoch:0),
+            session?session->world.Get():nullptr,reason);
+    }
 
     bool IsInstance(SDK::UObject* object)
     {
@@ -86,13 +106,26 @@ namespace
         return object==nullptr;
     }
 
+    bool IsCurrentTerrainWorld(SDK::UCrUW_MapMenuTerrain* terrain,SDK::UWorld* world)
+    {
+        // GWorld is a context-dependent accessor, not the gameplay lifecycle.
+        // All callers have native admission before following these typed links.
+        if(!terrain || !world || world!=g_gameplayWorld.load() ||
+            !IsInstance(world) || !IsInstance(terrain) ||
+            !terrain->IsA(SDK::UCrUW_MapMenuTerrain::StaticClass()))return false;
+        auto* player=terrain->GetOwningPlayer();
+        if(!player || !IsInstance(player))return false;
+        auto* level=player->GetLevel();
+        return level && IsInstance(level) && level->OwningWorld==world;
+    }
+
     bool TryGetVisibleWorldRectImpl(MainMapBuildingLayer::WorldRect& out)
     {
         if(!MainMapNative::CanOperate()||!g_session||g_session->closing) return false;
         auto& session=*g_session;
         auto* terrain=static_cast<SDK::UCrUW_MapMenuTerrain*>(session.terrain.Get());
         auto* world=static_cast<SDK::UWorld*>(session.world.Get());
-        if(!terrain||!world||world!=SDK::UWorld::GetWorld()||
+        if(!IsCurrentTerrainWorld(terrain,world)||
             !IsInstance(terrain)||!terrain->IsA(SDK::UCrUW_MapMenuTerrain::StaticClass())||
             !terrain->IsVisible()||!terrain->IsRendered()) return false;
 
@@ -157,8 +190,6 @@ namespace
         if(!std::isfinite(result.minX)||!std::isfinite(result.minY)||
             !std::isfinite(result.maxX)||!std::isfinite(result.maxY)||
             result.maxX<=result.minX||result.maxY<=result.minY) return false;
-        session.visibleLocal={static_cast<float>(localBounds.minX),static_cast<float>(localBounds.minY),
-            static_cast<float>(localBounds.maxX-localBounds.minX),static_cast<float>(localBounds.maxY-localBounds.minY)};
         out=result;
         return true;
     }
@@ -166,32 +197,25 @@ namespace
     {
         if (!g_session) return true;
         auto& session=*g_session;
+        auto* const worldIdentity=session.world.Get();
         if (!MainMapNative::CanOperate())
         {
-            LOG_WARN("MainMap: session cleanup deferred by admission; ownership retained");
+            LogSessionGate(session.diagnosticCleanupDeferrals,0,"terrain session cleanup deferred",
+                &session,"native-admission-closed");
             return false;
         }
-        auto* image=static_cast<SDK::UImage*>(session.image.Get());
-        if (image && session.attached)
-        {
-            image->RemoveFromParent();
-            session.attached=false;
-        }
-        if (image && session.brushBound)
-        {
-            image->SetBrushFromMaterial(nullptr);
-            session.brushBound=false;
-        }
-        // Retire consumers before dependencies. On rejection keep this exact
-        // owner, including any not-yet-reset leases, for the next admitted tick.
-        if (!session.image.Reset() || !session.frame.Reset() ||
-            !session.presentParent.Reset() || !session.composeParent.Reset() ||
-            !session.owningMenu.Reset() || !session.canvas.Reset() ||
+        // Retire the BCT1 consumer before terrain dependencies in RenderingProof.
+        // Preserve every terrain lease if any release is rejected.
+        if (!session.owningMenu.Reset() || !session.canvas.Reset() ||
             !session.terrain.Reset() || !session.world.Reset())
         {
-            LOG_WARN("MainMap: session resource release deferred; ownership retained");
+            LogSessionGate(session.diagnosticCleanupDeferrals,1,"terrain session cleanup deferred",
+                &session,"strong-lease-release-rejected");
             return false;
         }
+        LOG_INFO("MainMap diagnostics: terrain session cleanup completed epoch=%llu world=%p reason=%s",
+            static_cast<unsigned long long>(session.epoch),worldIdentity,
+            session.closingReason?session.closingReason:"unspecified");
         delete g_session; // Native C++ owner only; never delete a UObject.
         g_session=nullptr;
         return true;
@@ -201,19 +225,25 @@ namespace
     {
         if (!MainMapNative::IsGameThread())
         {
-            g_cleanupRequested.store(true);
+            RequestCleanup(reason);
             LOG_WARN("MainMap A2.3B: cleanup requested off GT (%s); no UObject access",reason);
             return;
         }
         if (!g_session) return;
+        if(!g_session->closing)
+        {
+            g_session->closingReason=reason;
+            LOG_INFO("MainMap diagnostics: terrain session closing epoch=%llu world=%p reason=%s",
+                static_cast<unsigned long long>(g_session->epoch),g_session->world.Get(),reason);
+        }
         g_session->closing=true;
         Cleanup();
     }
 
     void Reject(const char* reason)
     {
-        LOG_ERROR("MainMap: terrain presentation candidate rejected (%s)",reason);
-        Close("candidate failure");
+        LOG_ERROR("MainMap: terrain session rejected (%s)",reason);
+        Close(reason);
     }
 }
 
@@ -222,44 +252,98 @@ namespace MainMapBuildingLayer
     bool TryGetConsumerContext(ConsumerContext& out)
     {
         out={};
-        if(!MainMapNative::CanOperate() || !HasActiveTerrainSession() ||
-            g_cleanupRequested.load())return false;
+        if(!MainMapNative::CanOperate())
+        {
+            LogSessionGate(g_contextWithoutSession,0,"consumer context rejected",nullptr,"native-admission-closed");
+            return false;
+        }
+        if(!g_session)
+        {
+            LogSessionGate(g_contextWithoutSession,1,"consumer context rejected",nullptr,"no-terrain-session");
+            return false;
+        }
         auto& session=*g_session;
+        if(session.closing)
+        {
+            LogSessionGate(session.diagnosticContextRejections,0,"consumer context rejected",&session,"session-closing");
+            return false;
+        }
+        if(g_stopping.load())
+        {
+            LogSessionGate(session.diagnosticContextRejections,1,"consumer context rejected",&session,"shutdown-started");
+            return false;
+        }
+        if(g_cleanupRequestedReason.load())
+        {
+            LogSessionGate(session.diagnosticContextRejections,2,"consumer context rejected",&session,"cleanup-request-pending");
+            return false;
+        }
         auto* terrain=static_cast<SDK::UCrUW_MapMenuTerrain*>(session.terrain.Get());
         auto* world=static_cast<SDK::UWorld*>(session.world.Get());
-        if(!terrain || !world || world!=SDK::UWorld::GetWorld() ||
-            !IsInstance(world) || !IsInstance(terrain))return false;
+        if(!IsCurrentTerrainWorld(terrain,world))
+        { LogSessionGate(session.diagnosticContextRejections,3,"consumer context rejected",&session,"world-missing-or-replaced");return false; }
+        if(!IsInstance(world) || !IsInstance(terrain))
+        { LogSessionGate(session.diagnosticContextRejections,4,"consumer context rejected",&session,"world-or-terrain-instance-invalid");return false; }
         auto* treeObject=terrain->Outer;
-        if(!treeObject || !IsInstance(treeObject) || !treeObject->IsA(SDK::UWidgetTree::StaticClass()))return false;
+        if(!treeObject || !IsInstance(treeObject) || !treeObject->IsA(SDK::UWidgetTree::StaticClass()))
+        { LogSessionGate(session.diagnosticContextRejections,5,"consumer context rejected",&session,"terrain-outer-not-live-widget-tree");return false; }
         auto* tree=static_cast<SDK::UWidgetTree*>(treeObject);
         auto* areaObject=tree->Outer;
-        if(!areaObject || !IsInstance(areaObject) || !areaObject->IsA(SDK::UWBP_MapMenuMapArea_C::StaticClass()))return false;
+        if(!areaObject || !IsInstance(areaObject) || !areaObject->IsA(SDK::UWBP_MapMenuMapArea_C::StaticClass()))
+        { LogSessionGate(session.diagnosticContextRejections,6,"consumer context rejected",&session,"tree-outer-not-live-map-area");return false; }
         auto* area=static_cast<SDK::UCrUW_MapMenuMapArea*>(areaObject);
         if(area->WidgetTree!=tree || area->MapMenuTerrain!=terrain ||
             !area->CanvasPanelMapArea || !IsInstance(area->CanvasPanelMapArea) ||
             !area->CanvasPanelMapArea->IsA(SDK::UCanvasPanel::StaticClass()) ||
-            terrain->GetParent()!=area->CanvasPanelMapArea)return false;
+            terrain->GetParent()!=area->CanvasPanelMapArea)
+        { LogSessionGate(session.diagnosticContextRejections,7,"consumer context rejected",&session,"map-area-widget-links");return false; }
         auto* menuTreeObject=area->Outer;
-        if(!menuTreeObject || !IsInstance(menuTreeObject) || !menuTreeObject->IsA(SDK::UWidgetTree::StaticClass()))return false;
+        if(!menuTreeObject || !IsInstance(menuTreeObject) || !menuTreeObject->IsA(SDK::UWidgetTree::StaticClass()))
+        { LogSessionGate(session.diagnosticContextRejections,8,"consumer context rejected",&session,"area-outer-not-live-menu-tree");return false; }
         auto* menuTree=static_cast<SDK::UWidgetTree*>(menuTreeObject);
         auto* menuObject=menuTree->Outer;
-        if(!menuObject || !IsInstance(menuObject) || !menuObject->IsA(SDK::UCrUW_MapMenu::StaticClass()))return false;
+        if(!menuObject || !IsInstance(menuObject) || !menuObject->IsA(SDK::UCrUW_MapMenu::StaticClass()))
+        { LogSessionGate(session.diagnosticContextRejections,9,"consumer context rejected",&session,"menu-tree-outer-not-live-menu");return false; }
         auto* menu=static_cast<SDK::UCrUW_MapMenu*>(menuObject);
-        if(menu->WidgetTree!=menuTree || menu->MapMenuMapArea!=area)return false;
-        if(session.owningMenu.Get() && session.owningMenu.Get()!=menu)return false;
-        if(!session.owningMenu.Get() && !session.owningMenu.Acquire(menu))return false;
-        if(!menu->IsActivated())return false;
+        if(menu->WidgetTree!=menuTree || menu->MapMenuMapArea!=area)
+        { LogSessionGate(session.diagnosticContextRejections,10,"consumer context rejected",&session,"menu-widget-links");return false; }
+        if(session.owningMenu.Get() && session.owningMenu.Get()!=menu)
+        { LogSessionGate(session.diagnosticContextRejections,11,"consumer context rejected",&session,"owning-menu-mismatch");return false; }
+        if(!session.owningMenu.Get() && !session.owningMenu.Acquire(menu))
+        { LogSessionGate(session.diagnosticContextRejections,12,"consumer context rejected",&session,"owning-menu-retention");return false; }
+        if(!menu->IsActivated())
+        { LogSessionGate(session.diagnosticContextRejections,13,"consumer context rejected",&session,"menu-not-activated");return false; }
         // Activation is separate from layout availability. Phase 1 opens only
         // metadata ownership; Phase 2 must also validate clipped geometry/materials.
         for(auto* widget=static_cast<SDK::UWidget*>(terrain);widget;widget=widget->GetParent())
-            if(!IsInstance(widget) || !widget->IsVisible() || !widget->IsRendered())return false;
-        if(!menu->IsVisible() || !menu->IsRendered() || !area->IsVisible() || !area->IsRendered())return false;
+            if(!IsInstance(widget) || !widget->IsVisible() || !widget->IsRendered())
+            { LogSessionGate(session.diagnosticContextRejections,14,"consumer context rejected",&session,"terrain-widget-ancestor-not-live-visible-rendered");return false; }
+        if(!menu->IsVisible() || !menu->IsRendered() || !area->IsVisible() || !area->IsRendered())
+        { LogSessionGate(session.diagnosticContextRejections,15,"consumer context rejected",&session,"menu-or-area-not-visible-rendered");return false; }
         auto* settings=SDK::UCrMapMenuDevSettings::GetDefaultObj();
         auto* data=settings?settings->TerrainData.Get():nullptr;
-        if(!data || !IsInstance(data) || !data->IsA(SDK::UCrMapMenuTerrainData::StaticClass()))return false;
+        if(!data || !IsInstance(data) || !data->IsA(SDK::UCrMapMenuTerrainData::StaticClass()))
+        { LogSessionGate(session.diagnosticContextRejections,16,"consumer context rejected",&session,"terrain-data-invalid");return false; }
         const double x=data->MapTerrainTopLeftPivotPoint.X,y=data->MapTerrainTopLeftPivotPoint.Y;
-        if(!std::isfinite(x) || !std::isfinite(y))return false;
+        if(!std::isfinite(x) || !std::isfinite(y))
+        { LogSessionGate(session.diagnosticContextRejections,17,"consumer context rejected",&session,"terrain-origin-non-finite");return false; }
         out={world,session.epoch,x,y};
+        return true;
+    }
+
+    bool TryGetTilePresentationContext(SDK::UCanvasPanel*& canvas,SDK::UWidgetTree*& tree)
+    {
+        canvas=nullptr;tree=nullptr;
+        if(!MainMapNative::CanOperate()||!g_session||g_session->closing)return false;
+        auto* terrain=static_cast<SDK::UCrUW_MapMenuTerrain*>(g_session->terrain.Get());
+        if(!terrain||!IsInstance(terrain)||!terrain->IsA(SDK::UCrUW_MapMenuTerrain::StaticClass()))return false;
+        auto* treeObject=terrain->WidgetTree;
+        auto* canvasObject=terrain->CanvasPanelTerrain;
+        if(!treeObject||!canvasObject||!IsInstance(treeObject)||!IsInstance(canvasObject)||
+            !treeObject->IsA(SDK::UWidgetTree::StaticClass())||!canvasObject->IsA(SDK::UCanvasPanel::StaticClass())||
+            treeObject->Outer!=terrain||canvasObject->Outer!=treeObject)return false;
+        canvas=static_cast<SDK::UCanvasPanel*>(canvasObject);
+        tree=static_cast<SDK::UWidgetTree*>(treeObject);
         return true;
     }
 
@@ -274,7 +358,7 @@ namespace MainMapBuildingLayer
         if(!MainMapNative::CanOperate() || !g_session || g_session->closing)return false;
         auto* terrain=static_cast<SDK::UCrUW_MapMenuTerrain*>(g_session->terrain.Get());
         auto* world=static_cast<SDK::UWorld*>(g_session->world.Get());
-        if(!terrain || !world || world!=SDK::UWorld::GetWorld())return false;
+        if(!IsCurrentTerrainWorld(terrain,world))return false;
         const auto geometry=terrain->GetPaintSpaceGeometry();
         Rect supported{};
         if(!GeometryRect(geometry,supported))return false;
@@ -313,38 +397,21 @@ namespace MainMapBuildingLayer
         return true;
     }
 
-    MiniMapBuildingAbiResult RenderBuildings(MiniMapBuildingRenderFn render,float delta,MiniMapBuildingRenderStatus& status)
-    {
-        WorldRect visible{};
-        if(!render || !MainMapNative::CanOperate() || !g_session || !g_session->published ||
-            !TryGetVisibleWorldRect(visible))return MINIMAP_BUILDING_ABI_UNAVAILABLE;
-        auto& session=*g_session;
-        auto* image=static_cast<SDK::UImage*>(session.image.Get());
-        auto* slot=static_cast<SDK::UCanvasPanelSlot*>(image->Slot);
-        // The texture represents the clipped visible rectangle, not the entire
-        // panned/zoomed terrain. Reuse the helper's terrain-local rectangle.
-        slot->SetAnchors({{0,0},{0,0}});
-        slot->SetOffsets(session.visibleLocal);
-        if(!session.frame.target.Begin())return MINIMAP_BUILDING_ABI_UNAVAILABLE;
-        struct EndPass { MainMapProof::BuildingTarget& Target; ~EndPass(){Target.End();} } end{session.frame.target};
-        MiniMapBuildingRenderRequest request{};
-        request.StructSize=sizeof(request);request.DeltaSeconds=delta;
-        request.Rectangle={visible.minX,visible.minY,visible.maxX,visible.maxY};
-        request.World=static_cast<SDK::UWorld*>(session.world.Get());
-        request.Destination=session.frame.target.Get();request.Canvas=session.frame.target.Canvas();
-        request.SpriteMaterial=session.frame.composeMid;request.SolidMaterial=session.frame.solidMid;
-        return render(&request,&status);
-    }
-
     bool HasActiveTerrainSession()
     {
         return g_session && !g_session->closing && !g_stopping.load();
     }
 
+    bool IsMainMapVisible()
+    {
+        ConsumerContext context{};
+        return TryGetConsumerContext(context);
+    }
+
     void TerrainConstruct(SDK::UObject* object)
     {
         if (g_stopping.load() || !MainMapNative::CanOperate()) return;
-        if (g_cleanupRequested.exchange(false)) Close("rejected destruction");
+        if (const char* reason=g_cleanupRequestedReason.exchange(nullptr)) Close(reason);
         if (g_session)
         {
             LOG_WARN("MainMap: terrain construct receiver=%p ignored while an existing session owns terrain=%p",
@@ -378,27 +445,15 @@ namespace MainMapBuildingLayer
         }
         auto& session=*g_session;
         session.epoch=g_nextConsumerEpoch++;
+        LOG_INFO("MainMap diagnostics: terrain session created epoch=%llu world=%p terrain=%p",
+            static_cast<unsigned long long>(session.epoch),world,terrain);
         if (!session.terrain.Acquire(terrain) || !session.world.Acquire(world) || !session.canvas.Acquire(canvas))
         {
             Reject("terrain/world/canvas retention");
             return;
         }
-        auto* objectImage=SDK::UGameplayStatics::SpawnObject(SDK::UImage::StaticClass(),tree);
-        if (!objectImage || !session.image.Acquire(objectImage))
-        {
-            Reject("image creation/retention");
-            return;
-        }
-        if (!objectImage->IsA(SDK::UImage::StaticClass()) || objectImage->Outer!=tree || !IsInstance(objectImage))
-        {
-            Reject("image identity");
-            return;
-        }
-        auto* image=static_cast<SDK::UImage*>(objectImage);
-        image->SetVisibility(SDK::ESlateVisibility::HitTestInvisible);
-        image->SetColorAndOpacity({1,1,1,1});
-        // Never draw or attach from native widget rebuilding. The admitted
-        // post-engine tick prepares one frame after resources/layout are ready.
+        // BCT1 owns its per-tile image and material leases. This service owns
+        // only the terrain session and its geometry/admission context.
     }
 
     bool TerrainDestruct(SDK::UObject* terrain,bool admitted)
@@ -406,7 +461,7 @@ namespace MainMapBuildingLayer
         if (!admitted)
         {
             // May be called off GT. No receiver dereference or owner access.
-            g_cleanupRequested.store(true);
+            RequestCleanup("terrain destruct admission rejected");
             return false;
         }
         if (g_session && g_session->terrain.Get()==terrain)
@@ -417,76 +472,46 @@ namespace MainMapBuildingLayer
         return false;
     }
 
-    void Tick(bool materialsReady)
+    void Tick()
     {
-        if (!MainMapNative::CanOperate()) return;
-        if (g_cleanupRequested.exchange(false)) Close("admission-rejected destruction");
+        if (!MainMapNative::CanOperate())
+        {
+            LogSessionGate(g_tickWithoutAdmission,0,"terrain Tick blocked",nullptr,"native-admission-closed");
+            return;
+        }
+        if (const char* reason=g_cleanupRequestedReason.exchange(nullptr)) Close(reason);
         if (!g_session) return;
         if (g_session->closing) { Cleanup(); return; }
-        if (g_stopping.load()) return;
         auto& session=*g_session;
-        if(session.world.Get()!=SDK::UWorld::GetWorld()) {Close("world replacement");return;}
+        if (g_stopping.load())
+        { LogSessionGate(session.diagnosticTickBlocks,1,"terrain Tick blocked",&session,"shutdown-started");return; }
+        if(!IsCurrentTerrainWorld(static_cast<SDK::UCrUW_MapMenuTerrain*>(session.terrain.Get()),
+            static_cast<SDK::UWorld*>(session.world.Get())))
+        { LogSessionGate(session.diagnosticTickBlocks,8,"terrain Tick blocked",&session,"world-replaced");Close("world replacement");return; }
         auto* terrain=static_cast<SDK::UCrUW_MapMenuTerrain*>(session.terrain.Get());
         auto* canvas=static_cast<SDK::UCanvasPanel*>(session.canvas.Get());
-        auto* image=static_cast<SDK::UImage*>(session.image.Get());
-        if (!image || !IsInstance(terrain) || !IsInstance(canvas) || terrain->CanvasPanelTerrain!=canvas)
+        if (!IsInstance(terrain) || !IsInstance(canvas) || terrain->CanvasPanelTerrain!=canvas)
         {
-            Reject("session canvas/image changed");
+            LogSessionGate(session.diagnosticTickBlocks,9,"terrain Tick blocked",&session,"session-terrain-or-canvas-invalid");
+            Close("session terrain/canvas changed");
             return;
         }
-        if(session.published||!materialsReady) return;
-        const auto size=SDK::USlateBlueprintLibrary::GetLocalSize(canvas->GetCachedGeometry());
-        if (!std::isfinite(size.X) || !std::isfinite(size.Y) || size.X<=0 || size.Y<=0)
-        {
-            return;
-        }
-        auto* compose=MainMapProof::LoadMaterial("/Game/Mods/MiniMap/Materials/M_BuildingCompose.M_BuildingCompose",
-            SDK::EMaterialDomain::MD_Surface,session.composeParent);
-        auto* present=MainMapProof::LoadMaterial("/Game/Mods/MainMap/Materials/M_BuildingPresent.M_BuildingPresent",
-            SDK::EMaterialDomain::MD_UI,session.presentParent);
-        if (!compose || !present || !MainMapProof::PreparePresentationFrame(
-            static_cast<SDK::UWorld*>(session.world.Get()),compose,present,session.frame))
-        {
-            Reject("production material/target preparation");
-            return;
-        }
-        if (!MainMapNative::CanOperate() || g_cleanupRequested.load() || g_stopping.load())
-        {
-            Reject("publication admission/lifecycle closed");
-            return;
-        }
-        image->SetBrushFromMaterial(session.frame.presentMid);
-        session.brushBound=true;
-        if (image->Brush.ResourceObject!=session.frame.presentMid)
-        {
-            Reject("presentation material binding");
-            return;
-        }
-        auto* slot=canvas->AddChildToCanvas(image);
-        // AddChildToCanvas may have attached even if its return is unexpected.
-        // Record attachment before validation so rollback always withdraws it.
-        session.attached=image->Slot!=nullptr;
-        if (!slot || !slot->IsA(SDK::UCanvasPanelSlot::StaticClass()) || image->Slot!=slot ||
-            slot->Parent!=canvas || slot->Content!=image)
-        {
-            Reject("canvas attachment");
-            return;
-        }
-        // Stretch across the parent's current local geometry. Zero margins
-        // and alignment give local origin (0,0); no map-world origin is used.
-        slot->SetAutoSize(false);
-        slot->SetAlignment({0,0});
-        slot->SetAnchors({{0,0},{1,1}});
-        slot->SetOffsets({0,0,0,0});
-        slot->SetZOrder(1);
-        session.published=true;
+        // BuildingComplexConsumer obtains clipped world bounds and grouped
+        // tile pixel spans through this lifecycle/geometry service.
+    }
+
+    void WorldBeginPlay(SDK::UWorld* world)
+    {
+        g_gameplayWorld.store(world);
     }
 
     bool BeforeWorldEnd(SDK::UWorld* world)
     {
+        auto* expected=world;
+        g_gameplayWorld.compare_exchange_strong(expected,nullptr);
         if (!MainMapNative::IsGameThread())
         {
-            g_cleanupRequested.store(true);
+            RequestCleanup("world end callback off game thread");
             LOG_WARN("MainMap A2.3B: world-end cleanup deferred off GT");
             return false;
         }
