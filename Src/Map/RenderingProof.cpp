@@ -5,14 +5,12 @@
 #include "Engine_classes.hpp"
 #ifdef MODLOADER_CLIENT_BUILD
 #include "BuildingLayer.h"
-#include "BuildingComplexConsumer.h"
 #endif
 
 namespace
 {
     bool g_registered = false;
     bool g_resourceSetupAttempted = false;
-    bool g_materialContainerMounted = false;
     PluginPakHandle g_pakHandle = 0;
 
     void ObserveTerrainConstruct(SDK::UObject* terrain)
@@ -25,9 +23,7 @@ namespace
     void ObserveTerrainDestruct(SDK::UObject* terrain,bool admitted)
     {
 #ifdef MODLOADER_CLIENT_BUILD
-        const bool closed=MainMapBuildingLayer::TerrainDestruct(terrain,admitted);
-        if(closed || !admitted)MainMapBuildingComplex::RequestClose();
-        if(admitted)MainMapBuildingComplex::ServiceClose();
+        MainMapBuildingLayer::TerrainDestruct(terrain,admitted);
 #endif
     }
 
@@ -41,9 +37,7 @@ namespace
     void BeforeWorldEnd(SDK::UWorld* world,const char*)
     {
 #ifdef MODLOADER_CLIENT_BUILD
-        const bool closed=MainMapBuildingLayer::BeforeWorldEnd(world);
-        if(closed || !MainMapNative::IsGameThread())MainMapBuildingComplex::RequestClose();
-        if(MainMapNative::CanOperate())MainMapBuildingComplex::ServiceClose();
+        MainMapBuildingLayer::BeforeWorldEnd(world);
 #endif
     }
 
@@ -52,8 +46,7 @@ namespace
 #ifdef MODLOADER_CLIENT_BUILD
         MainMapBuildingLayer::Tick();
 #endif
-        // Mount the embedded material container before the BCT1 consumer can
-        // load M_BuildingComplexPresent. The registry owns it for process life.
+        // Mount embedded presentation materials once. The registry owns the container for process life.
         if (!g_resourceSetupAttempted && MainMapNative::CanOperate())
         {
             g_resourceSetupAttempted = true;
@@ -89,17 +82,11 @@ namespace
                     }
                     else
                     {
-                        g_materialContainerMounted = true;
                         LOG_INFO("MainMap diagnostics: material container mount accepted name=ExternalMapMaterials handle=%p",g_pakHandle);
                     }
                 }
             }
         }
-#ifdef MODLOADER_CLIENT_BUILD
-        const bool mainMapVisible=MainMapBuildingLayer::IsMainMapVisible();
-        MainMapBuildingComplex::Tick(g_materialContainerMounted,mainMapVisible);
-        MainMapBuildingComplex::SetPresentationVisible(mainMapVisible);
-#endif
     }
 }
 
@@ -117,11 +104,9 @@ namespace MainMapRenderingProof
             return false;
         }
         if(!MainMapNative::InstallTerrainHooks(g_self,ObserveTerrainConstruct,ObserveTerrainDestruct)) return false;
-        MainMapBuildingComplex::Initialize();
         world->RegisterOnBeforeWorldEndPlay(BeforeWorldEnd);
         world->RegisterOnWorldBeginPlay(OnWorldBeginPlay);
         g_resourceSetupAttempted = false;
-        g_materialContainerMounted = false;
         g_pakHandle = 0;
         engine->RegisterOnTick(OnTick);
         g_registered = true;
@@ -131,9 +116,9 @@ namespace MainMapRenderingProof
     void Shutdown(bool earlyEngineShutdown)
     {
 #ifdef MODLOADER_CLIENT_BUILD
-        MainMapBuildingComplex::Shutdown(earlyEngineShutdown);
         MainMapBuildingLayer::Shutdown();
 #endif
+        (void)earlyEngineShutdown;
         MainMapNative::RemoveTerrainHooks();
         if (g_registered && g_self && g_self->hooks && g_self->hooks->Engine)
         {

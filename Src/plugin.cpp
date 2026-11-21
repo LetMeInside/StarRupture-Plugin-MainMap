@@ -54,7 +54,9 @@ static PluginInfo s_pluginInfo = {
     "Kian369",
     "TODO: Add plugin description",
     PLUGIN_INTERFACE_VERSION,
-    MAINMAP_EXPORTS_TARGET
+    MAINMAP_EXPORTS_TARGET,
+    PLUGIN_GAME_BUILT_CL,
+    PluginLoadSetting(PluginReload::RESTART) | PluginUnloadSetting(PluginReload::RESTART)
 };
 
 extern "C" __declspec(dllexport)

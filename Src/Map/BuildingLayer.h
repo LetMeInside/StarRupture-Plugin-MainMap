@@ -3,6 +3,7 @@
 
 namespace SDK { class UObject; class UWorld; }
 namespace SDK { class UCanvasPanel; class UWidgetTree; }
+namespace MainMapBuildingMap { class BuildingMapRemote; }
 
 namespace MainMapBuildingLayer
 {
@@ -31,6 +32,9 @@ namespace MainMapBuildingLayer
     // validated terrain context; a terrain session alone is not visibility.
     bool IsMainMapVisible();
     bool TryGetVisibleWorldRect(WorldRect& out);
+    // Stage 3 presentation reads the currently copied images from this owner;
+    // provider operations remain driven by Tick and the terrain lifecycle.
+    MainMapBuildingMap::BuildingMapRemote& GetBuildingMapRemote() noexcept;
     // Device-pixel length of a 500 m tile under the current terrain geometry.
     bool TryGetGroupedTilePixelSpan(double& out);
     void Shutdown();

@@ -1,4 +1,5 @@
 #include "BuildingLayer.h"
+#include "BuildingMapRemote.h"
 #include "Native/NativeApi.h"
 #include "ChimeraUI_classes.hpp"
 #include "WBP_MapMenuMapArea_classes.hpp"
@@ -77,6 +78,7 @@ namespace
     std::atomic<SDK::UWorld*> g_gameplayWorld{nullptr};
     uint64_t g_contextWithoutSession=0;
     uint64_t g_tickWithoutAdmission=0;
+    MainMapBuildingMap::BuildingMapRemote g_buildingMapRemote;
 
     void RequestCleanup(const char* reason)
     {
@@ -237,6 +239,7 @@ namespace
                 static_cast<unsigned long long>(g_session->epoch),g_session->world.Get(),reason);
         }
         g_session->closing=true;
+        g_buildingMapRemote.CloseViewport();
         Cleanup();
     }
 
@@ -350,6 +353,12 @@ namespace MainMapBuildingLayer
     bool TryGetVisibleWorldRect(WorldRect& out)
     {
         return TryGetVisibleWorldRectImpl(out);
+    }
+
+    /** Exposes the terrain owner's remote data to presentation without duplicating its image cache. */
+    MainMapBuildingMap::BuildingMapRemote& GetBuildingMapRemote() noexcept
+    {
+        return g_buildingMapRemote;
     }
 
     bool TryGetGroupedTilePixelSpan(double& out)
@@ -496,8 +505,14 @@ namespace MainMapBuildingLayer
             Close("session terrain/canvas changed");
             return;
         }
-        // BuildingComplexConsumer obtains clipped world bounds and grouped
-        // tile pixel spans through this lifecycle/geometry service.
+        MainMapBuildingLayer::WorldRect visibleWorld{};
+        if (!TryGetVisibleWorldRect(visibleWorld))
+        {
+            g_buildingMapRemote.CloseViewport();
+            return;
+        }
+        g_buildingMapRemote.UpdateViewport(visibleWorld.minX, visibleWorld.minY,
+            visibleWorld.maxX - visibleWorld.minX, visibleWorld.maxY - visibleWorld.minY);
     }
 
     void WorldBeginPlay(SDK::UWorld* world)
@@ -527,6 +542,7 @@ namespace MainMapBuildingLayer
     {
         if (g_stopping.exchange(true)) return;
         Close("shutdown");
+        g_buildingMapRemote.Shutdown();
         const auto outstanding=MainMapNative::OutstandingLeaseCount();
         if (outstanding!=0)
             LOG_ERROR("MainMap A2.3B: shutdown cleanup incomplete; lease bookkeeping retained, no unsafe release attempted");

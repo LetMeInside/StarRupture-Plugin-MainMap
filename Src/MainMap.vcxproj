@@ -65,7 +65,7 @@
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(StarRupturePluginSDKRoot)include;$(StarRuptureSDKConfigDir);$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(StarRupturePluginSDKRoot)include;$(StarRuptureSDKConfigDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -83,7 +83,7 @@
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(StarRupturePluginSDKRoot)include;$(StarRuptureSDKConfigDir);$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(StarRupturePluginSDKRoot)include;$(StarRuptureSDKConfigDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -96,7 +96,7 @@
   <ItemGroup>
     <ClInclude Include="Config\Config.h" />
     <ClInclude Include="Map\BuildingLayer.h" />
-    <ClInclude Include="Map\BuildingComplexConsumer.h" />
+    <ClInclude Include="Map\BuildingMapRemote.h" />
     <ClInclude Include="Map\MaterialProof.h" />
     <ClInclude Include="Map\RenderingProof.h" />
     <ClInclude Include="Native\Fingerprints.h" />
@@ -119,7 +119,7 @@
     <ClCompile Include="Map\BuildingLayer.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)' != 'Client Debug' And '$(Configuration)' != 'Client Release'">true</ExcludedFromBuild>
     </ClCompile>
-    <ClCompile Include="Map\BuildingComplexConsumer.cpp">
+    <ClCompile Include="Map\BuildingMapRemote.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)' != 'Client Debug' And '$(Configuration)' != 'Client Release'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="$(StarRuptureSDKSourceDir)CommonUI_functions.cpp">
