@@ -7,6 +7,7 @@
 #include "MaterialProof.h"
 #include "SlateCore_structs.hpp"
 #include "UMG_classes.hpp"
+#include "plugin_helpers.h"
 
 #include <cmath>
 #include <limits>
@@ -32,9 +33,9 @@ namespace MainMapBuildingMap
     }
 
     /** Detaches the image and releases the shared presentation owner through admitted operations. */
-    bool BuildingMapPresentation::RetireShared() noexcept
+    bool BuildingMapPresentation::RetireShared(bool widgetDestructionStarted) noexcept
     {
-        return SharedOwner().Retire();
+        return SharedOwner().Retire(widgetDestructionStarted);
     }
 
     /** Creates or updates one retained UI presentation for the current terrain session. */
@@ -44,7 +45,7 @@ namespace MainMapBuildingMap
     {
         if (!MainMapNative::CanOperate() || !MainMapNative::IsGameThread() ||
             !context.world || !context.epoch) return false;
-        if (epoch_ && epoch_ != context.epoch && !Retire()) return false;
+        if (epoch_ && epoch_ != context.epoch && !Retire(false)) return false;
         epoch_ = context.epoch;
         if (!targetReady || !targetInfo.Target || !materialResourcesReady)
             return WithdrawTarget();
@@ -73,17 +74,35 @@ namespace MainMapBuildingMap
     bool BuildingMapPresentation::EnsureMaterial(SDK::UObject* worldContext, bool materialResourcesReady)
     {
         if (!materialResourcesReady) return false;
+        if (materialInstance_ && materialInstanceDetached_)
+        {
+            if (!materialInstance_.Reset())
+            {
+                LogRetirementFailure("withdraw-material-instance-lease-release");
+                return false;
+            }
+            materialInstanceDetached_ = false;
+            materialInstanceAttempted_ = false;
+            retirementFailureStage_ = nullptr;
+        }
         if (materialValidated_ && parentMaterial_ && materialInstance_) return true;
-        if (materialLoadAttempted_) return false;
-        materialLoadAttempted_ = true;
-        auto* parent = MainMapProof::LoadMaterial(
-            "/Game/Mods/MainMap/Materials/M_BuildingPresent.M_BuildingPresent",
-            SDK::EMaterialDomain::MD_UI, parentMaterial_);
-        if (!parent) return false;
+        if (!parentMaterial_)
+        {
+            if (materialLoadAttempted_) return false;
+            materialLoadAttempted_ = true;
+            auto* parent = MainMapProof::LoadMaterial(
+                "/Game/Mods/MainMap/Materials/M_BuildingPresent.M_BuildingPresent",
+                SDK::EMaterialDomain::MD_UI, parentMaterial_);
+            if (!parent) return false;
+        }
+        if (materialInstanceAttempted_) return false;
+        materialInstanceAttempted_ = true;
         auto* instance = SDK::UKismetMaterialLibrary::CreateDynamicMaterialInstance(
-            worldContext, parent, {}, SDK::EMIDCreationFlags::None);
+            worldContext, static_cast<SDK::UMaterialInterface*>(parentMaterial_.Get()), {},
+            SDK::EMIDCreationFlags::None);
         if (!instance || !instance->IsA(SDK::UMaterialInstanceDynamic::StaticClass()) ||
             !materialInstance_.Acquire(instance)) return false;
+        materialInstanceDetached_ = false;
         materialValidated_ = true;
         return true;
     }
@@ -95,7 +114,13 @@ namespace MainMapBuildingMap
         if (image)
         {
             if (image->Outer != tree) return false;
-            if (image->GetParent() == canvas) return ValidateAttachment(canvas, tree);
+            if (image->GetParent() == canvas)
+            {
+                auto* material = MaterialInstance();
+                if (!material) return false;
+                if (image->Brush.ResourceObject != material) image->SetBrushFromMaterial(material);
+                return ValidateAttachment(canvas, tree);
+            }
             if (image->GetParent() || image->Slot) return false;
         }
         else
@@ -113,7 +138,13 @@ namespace MainMapBuildingMap
         if (image->Brush.ResourceObject != material) return false;
         auto* slot = canvas->AddChildToCanvas(image);
         if (!slot || !slot->IsA(SDK::UCanvasPanelSlot::StaticClass()) || image->Slot != slot) return false;
-        return ValidateAttachment(canvas, tree);
+        const bool attached = ValidateAttachment(canvas, tree);
+        if (attached && !firstAttachmentLogged_)
+        {
+            LOG_INFO("MainMap diagnostics: first presentation attachment established");
+            firstAttachmentLogged_ = true;
+        }
+        return attached;
     }
 
     /** Confirms WidgetTree Outer, UImage type, parent, CanvasPanelSlot, and material brush identity. */
@@ -243,8 +274,9 @@ namespace MainMapBuildingMap
     bool BuildingMapPresentation::RestoreCurrentTarget() noexcept
     {
         auto* material = MaterialInstance();
-        if (!material) return !presentedTargetValid_;
-        auto* target = presentedTargetValid_ ? static_cast<SDK::UTextureRenderTarget2D*>(target_.Get()) : nullptr;
+        if (!material || !presentedTargetValid_) return false;
+        auto* target = static_cast<SDK::UTextureRenderTarget2D*>(target_.Get());
+        if (!target) return false;
         const auto parameter = SDK::UKismetStringLibrary::Conv_StringToName(SDK::FString(L"BuildingTarget"));
         material->SetTextureParameterValue(parameter, target);
         return material->K2_GetTextureParameterValue(parameter) == target;
@@ -261,7 +293,25 @@ namespace MainMapBuildingMap
             candidate->SizeY != targetInfo.Height ||
             candidate->RenderTargetFormat != SDK::ETextureRenderTargetFormat::RTF_RGBA16f ||
             candidate->bForceLinearGamma == 0) return false;
-        if (candidateTarget_) candidateTarget_.Reset();
+        if (candidateTarget_)
+        {
+            if (!presentedTargetValid_)
+            {
+                WithdrawTarget();
+                return false;
+            }
+            if (!RestoreCurrentTarget())
+            {
+                HideImage();
+                return false;
+            }
+            if (!candidateTarget_.Reset())
+            {
+                LogRetirementFailure("candidate-target-lease-release");
+                return false;
+            }
+            retirementFailureStage_ = nullptr;
+        }
         if (retiredTarget_) RetryRetiredTarget();
         if (candidate == target_.Get())
         {
@@ -299,13 +349,40 @@ namespace MainMapBuildingMap
                 image->SetVisibility(SDK::ESlateVisibility::HitTestInvisible);
             else
                 HideImage();
-            candidateTarget_.Reset();
+            if (!restored && !presentedTargetValid_)
+            {
+                WithdrawTarget();
+                return false;
+            }
+            if (restored)
+            {
+                if (!candidateTarget_.Reset())
+                    LogRetirementFailure("candidate-target-lease-release");
+                else
+                    retirementFailureStage_ = nullptr;
+            }
             return false;
         }
+        const SectionTargetInfo oldInfo = presentedInfo_;
+        const bool hadOldTarget = presentedTargetValid_;
         if (target_) retiredTarget_ = std::move(target_);
         target_ = std::move(candidateTarget_);
         presentedInfo_ = targetInfo;
         presentedTargetValid_ = true;
+        if (hadOldTarget)
+        {
+            LOG_INFO("MainMap diagnostics: presentation target changed old=%lld,%lld revision=%llu new=%lld,%lld revision=%llu",
+                static_cast<long long>(oldInfo.GridX), static_cast<long long>(oldInfo.GridY),
+                static_cast<unsigned long long>(oldInfo.Revision),
+                static_cast<long long>(targetInfo.GridX), static_cast<long long>(targetInfo.GridY),
+                static_cast<unsigned long long>(targetInfo.Revision));
+        }
+        else
+        {
+            LOG_INFO("MainMap diagnostics: presentation target bound grid=%lld,%lld revision=%llu",
+                static_cast<long long>(targetInfo.GridX), static_cast<long long>(targetInfo.GridY),
+                static_cast<unsigned long long>(targetInfo.Revision));
+        }
         if (!ShowImage()) return false;
         RetryRetiredTarget();
         return true;
@@ -331,24 +408,42 @@ namespace MainMapBuildingMap
     bool BuildingMapPresentation::WithdrawTarget() noexcept
     {
         HideImage();
-        auto* material = MaterialInstance();
-        if (material)
+        auto* image = Image();
+        if (image)
         {
-            const auto parameter = SDK::UKismetStringLibrary::Conv_StringToName(SDK::FString(L"BuildingTarget"));
-            if (material->K2_GetTextureParameterValue(parameter))
-                material->SetTextureParameterValue(parameter, nullptr);
-            if (material->K2_GetTextureParameterValue(parameter)) return false;
+            image->SetBrushFromMaterial(nullptr);
+            if (image->Brush.ResourceObject)
+            {
+                LogRetirementFailure("withdraw-image-brush-still-bound");
+                return false;
+            }
         }
+        materialInstanceDetached_ = true;
+        if (materialInstance_ && !materialInstance_.Reset())
+        {
+            LogRetirementFailure("withdraw-material-instance-lease-release");
+            return false;
+        }
+        materialInstanceDetached_ = false;
+        materialInstanceAttempted_ = false;
+        materialValidated_ = false;
         presentedTargetValid_ = false;
         presentedInfo_ = {};
-        if (!target_.Reset() || !candidateTarget_.Reset() || !RetryRetiredTarget()) return false;
-        return true;
+        const bool released = ReleaseDetachedResources(false);
+        if (released) retirementFailureStage_ = nullptr;
+        return released;
     }
 
     /** Retries release of a target whose material binding has already been replaced or cleared. */
     bool BuildingMapPresentation::RetryRetiredTarget() noexcept
     {
-        return retiredTarget_.Reset();
+        if (retiredTarget_.Reset())
+        {
+            retirementFailureStage_ = nullptr;
+            return true;
+        }
+        LogRetirementFailure("retired-target-lease-release");
+        return false;
     }
 
     /** Collapses the image without releasing any object that may still be referenced by Slate. */
@@ -357,6 +452,7 @@ namespace MainMapBuildingMap
         auto* image = Image();
         if (!image || image->GetVisibility() == SDK::ESlateVisibility::Collapsed) return;
         image->SetVisibility(SDK::ESlateVisibility::Collapsed);
+        LOG_INFO("MainMap diagnostics: presentation hidden or withdrawn");
     }
 
     /** Sets HitTestInvisible only when needed and confirms the widget accepted visibility. */
@@ -364,9 +460,17 @@ namespace MainMapBuildingMap
     {
         auto* image = Image();
         if (!image) return false;
-        if (image->GetVisibility() != SDK::ESlateVisibility::HitTestInvisible)
+        const bool becomingVisible = image->GetVisibility() != SDK::ESlateVisibility::HitTestInvisible;
+        if (becomingVisible)
             image->SetVisibility(SDK::ESlateVisibility::HitTestInvisible);
-        return image->GetVisibility() == SDK::ESlateVisibility::HitTestInvisible;
+        const bool visible = image->GetVisibility() == SDK::ESlateVisibility::HitTestInvisible;
+        if (visible && becomingVisible)
+        {
+            LOG_INFO("MainMap diagnostics: presentation became visible grid=%lld,%lld revision=%llu",
+                static_cast<long long>(presentedInfo_.GridX), static_cast<long long>(presentedInfo_.GridY),
+                static_cast<unsigned long long>(presentedInfo_.Revision));
+        }
+        return visible;
     }
 
     /** Returns the retained dynamic material instance, if available. */
@@ -384,33 +488,110 @@ namespace MainMapBuildingMap
         return object && object->IsA(SDK::UImage::StaticClass()) ? static_cast<SDK::UImage*>(object) : nullptr;
     }
 
-    /** Removes Slate references before releasing all retained material, widget, and target objects. */
-    bool BuildingMapPresentation::Retire() noexcept
+    /** Logs a changed retirement failure stage once and suppresses identical retry messages. */
+    void BuildingMapPresentation::LogRetirementFailure(const char* stage) noexcept
     {
-        if (!MainMapNative::CanOperate() || !MainMapNative::IsGameThread()) return false;
-        HideImage();
-        auto* image = Image();
-        if (image)
+        if (retirementFailureStage_ == stage) return;
+        retirementFailureStage_ = stage;
+        LOG_WARN("MainMap diagnostics: presentation retirement failed stage=%s epoch=%llu section=%d grid=%lld,%lld revision=%llu",
+            stage, static_cast<unsigned long long>(epoch_), presentedTargetValid_ ? 1 : 0,
+            static_cast<long long>(presentedInfo_.GridX), static_cast<long long>(presentedInfo_.GridY),
+            static_cast<unsigned long long>(presentedInfo_.Revision));
+    }
+
+    /** Releases the MID before target leases after its brush reference has been removed. */
+    bool BuildingMapPresentation::ReleaseDetachedResources(bool fullRetirement) noexcept
+    {
+        if (materialInstance_ && !materialInstance_.Reset())
         {
-            image->RemoveFromParent();
-            if (image->GetParent() || image->Slot) return false;
-            image->SetBrushFromMaterial(nullptr);
-            if (image->Brush.ResourceObject) return false;
+            LogRetirementFailure("material-instance-lease-release");
+            return false;
         }
-        auto* material = MaterialInstance();
-        if (material)
+        materialInstanceDetached_ = false;
+        retirementFailureStage_ = nullptr;
+        if (!target_.Reset())
         {
-            const auto parameter = SDK::UKismetStringLibrary::Conv_StringToName(SDK::FString(L"BuildingTarget"));
-            material->SetTextureParameterValue(parameter, nullptr);
-            if (material->K2_GetTextureParameterValue(parameter)) return false;
+            LogRetirementFailure("current-target-lease-release");
+            return false;
         }
-        if (!image_.Reset() || !materialInstance_.Reset() || !target_.Reset() ||
-            !candidateTarget_.Reset() || !retiredTarget_.Reset() || !parentMaterial_.Reset()) return false;
+        retirementFailureStage_ = nullptr;
+        if (!candidateTarget_.Reset())
+        {
+            LogRetirementFailure("candidate-target-lease-release");
+            return false;
+        }
+        retirementFailureStage_ = nullptr;
+        if (!retiredTarget_.Reset())
+        {
+            LogRetirementFailure("retired-target-lease-release");
+            return false;
+        }
+        retirementFailureStage_ = nullptr;
+        if (fullRetirement && !image_.Reset())
+        {
+            LogRetirementFailure("image-lease-release");
+            return false;
+        }
+        retirementFailureStage_ = nullptr;
+        if (fullRetirement && !parentMaterial_.Reset())
+        {
+            LogRetirementFailure("parent-material-lease-release");
+            return false;
+        }
+        retirementFailureStage_ = nullptr;
+        return true;
+    }
+
+    /** Detaches widgets before releasing leases and retains retry state after any failed release. */
+    bool BuildingMapPresentation::Retire(bool widgetDestructionStarted) noexcept
+    {
+        if (!MainMapNative::CanOperate() || !MainMapNative::IsGameThread())
+        {
+            LogRetirementFailure("native-admission-or-game-thread");
+            return false;
+        }
+        if (!widgetDetached_ && widgetDestructionStarted)
+        {
+            LogRetirementFailure("widget-destruction-started-before-detachment");
+            return false;
+        }
+        if (!widgetDetached_)
+        {
+            HideImage();
+            auto* image = Image();
+            if (image)
+            {
+                image->RemoveFromParent();
+                if (image->GetParent())
+                {
+                    LogRetirementFailure("image-parent-not-cleared-after-remove");
+                    return false;
+                }
+                if (image->Slot)
+                {
+                    LogRetirementFailure("image-slot-not-cleared-after-remove");
+                    return false;
+                }
+                image->SetBrushFromMaterial(nullptr);
+                if (image->Brush.ResourceObject)
+                {
+                    LogRetirementFailure("image-brush-still-references-material");
+                    return false;
+                }
+            }
+            widgetDetached_ = true;
+            materialInstanceDetached_ = true;
+        }
+        if (!ReleaseDetachedResources(true)) return false;
         presentedInfo_ = {};
         epoch_ = 0;
         materialLoadAttempted_ = false;
+        materialInstanceAttempted_ = false;
         materialValidated_ = false;
         presentedTargetValid_ = false;
+        widgetDetached_ = false;
+        materialInstanceDetached_ = false;
+        retirementFailureStage_ = nullptr;
         return true;
     }
 }

@@ -9,6 +9,11 @@
 #include <cstddef>
 #include <vector>
 
+namespace MainMapBuildingLayer
+{
+    struct WorldRect;
+}
+
 namespace MainMapBuildingMap
 {
     /** Read-only description of the one successfully composed Section target. */
@@ -22,6 +27,7 @@ namespace MainMapBuildingMap
         double SectionSizeMapUnits = 0.0;
         int32_t Width = 0;
         int32_t Height = 0;
+        uint64_t Revision = 0;
     };
 
     /** Owns the transient import and composition objects for one selected image identity. */
@@ -37,9 +43,10 @@ namespace MainMapBuildingMap
             Failure
         };
 
-        /** Updates the one lifecycle-owned target instance. */
+        /** Updates the target from images intersecting the visible rectangle computed by BuildingLayer. */
         static void UpdateShared(SDK::UObject* worldContext,
-            const BuildingMapRemote::ImageCollection& images, bool materialResourcesReady);
+            const BuildingMapRemote::ImageCollection& images,
+            const MainMapBuildingLayer::WorldRect& visibleWorld, bool materialResourcesReady);
         /** Retires resources owned by the shared instance through admitted lease releases. */
         static bool RetireShared() noexcept;
         /** Exposes read-only target status and bounds to the next presentation stage. */
@@ -51,9 +58,9 @@ namespace MainMapBuildingMap
         Status GetStatus() const noexcept;
         /** Returns the current target identity and its published Section bounds. */
         SectionTargetInfo GetTargetInfo() const noexcept;
-        /** Selects the first image and updates resources only when its local revision changes. */
+        /** Retains or selects one visible Section and updates resources only when its revision changes. */
         void Update(SDK::UObject* worldContext, const BuildingMapRemote::ImageCollection& images,
-            bool materialResourcesReady);
+            const MainMapBuildingLayer::WorldRect& visibleWorld, bool materialResourcesReady);
         /** Retires all transient resources through admitted StrongObjectLease releases. */
         bool Retire() noexcept;
 
@@ -104,7 +111,8 @@ namespace MainMapBuildingMap
         /** Moves a fully built resource set into the active owner after old releases succeed. */
         void AdoptResources(ResourceSet& resources) noexcept;
         /** Builds, composes, and commits a changed selection without discarding the prior target. */
-        void BuildSelectedImage(SDK::UObject* worldContext, const SectionImage& image);
+        void BuildSelectedImage(SDK::UObject* worldContext, const SectionImage& image,
+            const char* selectionReason);
         /** Reports whether pending resources match a selected coordinate and revision. */
         bool MatchesSelectedImage(const SectionImage& image) const noexcept;
         /** Retries cleanup of stale or partially-created pending objects. */
@@ -113,10 +121,16 @@ namespace MainMapBuildingMap
         void PromotePendingResources(const SectionImage& image) noexcept;
         /** Reports whether current retained content already represents this revision. */
         bool IsCurrentImage(const SectionImage& image) const noexcept;
+        /** Retains an eligible Section or chooses the greatest visible intersection in map order. */
+        const SectionImage* SelectVisibleImage(const BuildingMapRemote::ImageCollection& images,
+            const MainMapBuildingLayer::WorldRect& visibleWorld, const char*& selectionReason) const noexcept;
+        /** Validates published Section bounds and returns their positive intersection area. */
+        bool GetIntersectionArea(const SectionImage& image,
+            const MainMapBuildingLayer::WorldRect& visibleWorld, double& area) const noexcept;
         /** Moves every staged lease into the pending owner without losing failed releases. */
         void PreservePendingResources(ResourceSet& resources) noexcept;
-        /** Stores the selected Section identity and bounds after composition succeeds. */
-        void SetSelectedImage(const SectionImage& image) noexcept;
+        /** Stores the selected Section identity, bounds, and transition reason after composition succeeds. */
+        void SetSelectedImage(const SectionImage& image, const char* selectionReason) noexcept;
 
         MainMapNative::StrongObjectLease material_;
         ResourceSet current_;
@@ -125,10 +139,12 @@ namespace MainMapBuildingMap
         SectionTargetInfo pendingInfo_{};
         uint64_t revision_ = 0;
         uint64_t pendingRevision_ = 0;
+        const char* pendingSelectionReason_ = nullptr;
         bool materialLoadAttempted_ = false;
         bool materialValidated_ = false;
         bool ready_ = false;
         bool pendingReady_ = false;
+        bool firstCompositionLogged_ = false;
         Status status_ = Status::NoImage;
     };
 }

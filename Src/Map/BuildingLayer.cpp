@@ -28,6 +28,7 @@ namespace
         MainMapNative::StrongObjectLease owningMenu;
         uint64_t epoch=0;
         bool closing=false;
+        bool terrainDestructionStarted=false;
         uint64_t diagnosticTickBlocks=0;
         uint64_t diagnosticContextRejections=0;
         uint64_t diagnosticCleanupDeferrals=0;
@@ -209,7 +210,7 @@ namespace
                 &session,"native-admission-closed");
             return false;
         }
-        if (!MainMapBuildingMap::BuildingMapPresentation::RetireShared())
+        if (!MainMapBuildingMap::BuildingMapPresentation::RetireShared(session.terrainDestructionStarted))
         {
             LogSessionGate(session.diagnosticCleanupDeferrals,3,"terrain session cleanup deferred",
                 &session,"presentation-resource-release-rejected");
@@ -438,6 +439,10 @@ namespace MainMapBuildingLayer
         if (const char* reason=g_cleanupRequestedReason.exchange(nullptr)) Close(reason);
         if (g_session)
         {
+            if (g_session->closing) Cleanup();
+        }
+        if (g_session)
+        {
             LOG_WARN("MainMap: terrain construct receiver=%p ignored while an existing session owns terrain=%p",
                 object,g_session->terrain.Get());
             return;
@@ -491,6 +496,8 @@ namespace MainMapBuildingLayer
         if (g_session && g_session->terrain.Get()==terrain)
         {
             Close("terrain destruct before original");
+            if (g_session && g_session->terrain.Get()==terrain)
+                g_session->terrainDestructionStarted=true;
             return true;
         }
         return false;
@@ -531,7 +538,7 @@ namespace MainMapBuildingLayer
         g_buildingMapRemote.UpdateViewport(visibleWorld.minX, visibleWorld.minY,
             visibleWorld.maxX - visibleWorld.minX, visibleWorld.maxY - visibleWorld.minY);
         MainMapBuildingMap::BuildingMapTarget::UpdateShared(static_cast<SDK::UObject*>(session.world.Get()),
-            g_buildingMapRemote.Images(),
+            g_buildingMapRemote.Images(), visibleWorld,
             MainMapRenderingProof::RenderingProof::IsMaterialContainerReady());
         MainMapBuildingLayer::ConsumerContext context{};
         SDK::UCanvasPanel* presentationCanvas=nullptr;
@@ -578,7 +585,8 @@ namespace MainMapBuildingLayer
     {
         if (g_stopping.exchange(true)) return;
         Close("shutdown");
-        const bool presentationRetired=MainMapBuildingMap::BuildingMapPresentation::RetireShared();
+        const bool presentationRetired=MainMapBuildingMap::BuildingMapPresentation::RetireShared(
+            g_session && g_session->terrainDestructionStarted);
         if (presentationRetired && MainMapBuildingMap::BuildingMapTarget::RetireShared() && g_session)
             Cleanup();
         g_buildingMapRemote.Shutdown();

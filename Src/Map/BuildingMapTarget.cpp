@@ -1,10 +1,13 @@
 // Imports a selected MainMap Section image and composes one retained RGBA16f target.
 #include "BuildingMapTarget.h"
 
+#include "BuildingLayer.h"
 #include "MaterialProof.h"
 #include "Engine_classes.hpp"
+#include "plugin_helpers.h"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <new>
 #include <utility>
@@ -27,9 +30,10 @@ namespace MainMapBuildingMap
 
     /** Updates the one lifecycle-owned target instance. */
     void BuildingMapTarget::UpdateShared(SDK::UObject* worldContext,
-        const BuildingMapRemote::ImageCollection& images, bool materialResourcesReady)
+        const BuildingMapRemote::ImageCollection& images,
+        const MainMapBuildingLayer::WorldRect& visibleWorld, bool materialResourcesReady)
     {
-        SharedOwner().Update(worldContext, images, materialResourcesReady);
+        SharedOwner().Update(worldContext, images, visibleWorld, materialResourcesReady);
     }
 
     /** Retires resources owned by the shared instance through admitted lease releases. */
@@ -66,21 +70,30 @@ namespace MainMapBuildingMap
         return result;
     }
 
-    /** Reuses an unchanged Section revision or transactionally builds its replacement. */
+    /** Keeps the selected visible Section stable and rebuilds only when its revision changes. */
     void BuildingMapTarget::Update(SDK::UObject* worldContext,
-        const BuildingMapRemote::ImageCollection& images, bool materialResourcesReady)
+        const BuildingMapRemote::ImageCollection& images,
+        const MainMapBuildingLayer::WorldRect& visibleWorld, bool materialResourcesReady)
     {
         if (!MainMapNative::CanOperate() || !worldContext)
         {
             status_ = Status::Failure;
             return;
         }
-        if (images.empty())
+        if (!std::isfinite(visibleWorld.minX) || !std::isfinite(visibleWorld.minY) ||
+            !std::isfinite(visibleWorld.maxX) || !std::isfinite(visibleWorld.maxY) ||
+            visibleWorld.maxX <= visibleWorld.minX || visibleWorld.maxY <= visibleWorld.minY)
+        {
+            status_ = Status::Failure;
+            return;
+        }
+        const char* selectionReason = nullptr;
+        const SectionImage* selected = SelectVisibleImage(images, visibleWorld, selectionReason);
+        if (!selected)
         {
             Retire();
             return;
         }
-        const SectionImage& selected = images.begin()->second;
         if (!materialResourcesReady)
         {
             status_ = Status::ResourcesUnavailable;
@@ -91,23 +104,23 @@ namespace MainMapBuildingMap
             status_ = Status::ResourcesUnavailable;
             return;
         }
-        if (pendingReady_ && MatchesSelectedImage(selected))
+        if (pendingReady_ && MatchesSelectedImage(*selected))
         {
-            PromotePendingResources(selected);
+            PromotePendingResources(*selected);
             return;
         }
-        if (!ClearStalePendingResources(selected))
+        if (!ClearStalePendingResources(*selected))
         {
             status_ = Status::Failure;
             return;
         }
-        if (IsCurrentImage(selected))
+        if (IsCurrentImage(*selected))
         {
             ready_ = true;
             status_ = Status::Ready;
             return;
         }
-        BuildSelectedImage(worldContext, selected);
+        BuildSelectedImage(worldContext, *selected, selectionReason);
     }
 
     /** Retires current and pending objects while preserving any lease that cannot release. */
@@ -119,6 +132,7 @@ namespace MainMapBuildingMap
         revision_ = 0;
         pendingRevision_ = 0;
         pendingReady_ = false;
+        pendingSelectionReason_ = nullptr;
         if (!ResetResources(pending_) || !ResetResources(current_))
         {
             status_ = Status::Failure;
@@ -453,7 +467,7 @@ namespace MainMapBuildingMap
 
     /** Builds, composes, and commits a changed selection without discarding the prior target. */
     void BuildingMapTarget::BuildSelectedImage(SDK::UObject* worldContext,
-        const SectionImage& image)
+        const SectionImage& image, const char* selectionReason)
     {
         status_ = Status::Failure;
         if (image.Revision == 0 || image.Width == 0 || image.Height == 0)
@@ -494,11 +508,12 @@ namespace MainMapBuildingMap
             pendingInfo_.Height = static_cast<int32_t>(image.Height);
             pendingRevision_ = image.Revision;
             pendingReady_ = true;
+            pendingSelectionReason_ = selectionReason;
             status_ = Status::Failure;
             return;
         }
         AdoptResources(candidate);
-        SetSelectedImage(image);
+        SetSelectedImage(image, selectionReason);
     }
 
     /** Reports whether pending resources match a selected coordinate and revision. */
@@ -522,6 +537,7 @@ namespace MainMapBuildingMap
         pendingReady_ = false;
         pendingInfo_ = {};
         pendingRevision_ = 0;
+        pendingSelectionReason_ = nullptr;
         return true;
     }
 
@@ -537,7 +553,9 @@ namespace MainMapBuildingMap
         pendingReady_ = false;
         pendingInfo_ = {};
         pendingRevision_ = 0;
-        SetSelectedImage(image);
+        const char* selectionReason = pendingSelectionReason_;
+        SetSelectedImage(image, selectionReason);
+        pendingSelectionReason_ = nullptr;
     }
 
     /** Reports whether current retained content already represents this revision. */
@@ -545,6 +563,69 @@ namespace MainMapBuildingMap
     {
         return current_.RenderTarget.Get() && revision_ == image.Revision &&
             targetInfo_.GridX == image.GridX && targetInfo_.GridY == image.GridY;
+    }
+
+    /** Retains the pending/current Section when visible, otherwise chooses the largest visible overlap. */
+    const SectionImage* BuildingMapTarget::SelectVisibleImage(
+        const BuildingMapRemote::ImageCollection& images,
+        const MainMapBuildingLayer::WorldRect& visibleWorld, const char*& selectionReason) const noexcept
+    {
+        selectionReason = "initial visible candidate";
+        const bool hasPendingSelection = pendingReady_ && pending_.RenderTarget.Get();
+        const bool hasCurrentSelection = !hasPendingSelection && ready_ && current_.RenderTarget.Get();
+        if (hasPendingSelection || hasCurrentSelection)
+        {
+            const int64_t gridX = hasPendingSelection ? pendingInfo_.GridX : targetInfo_.GridX;
+            const int64_t gridY = hasPendingSelection ? pendingInfo_.GridY : targetInfo_.GridY;
+            const auto previous = images.find({gridX, gridY});
+            if (previous == images.end())
+            {
+                selectionReason = "previous candidate no longer available";
+            }
+            else
+            {
+                double intersectionArea = 0.0;
+                if (GetIntersectionArea(previous->second, visibleWorld, intersectionArea))
+                {
+                    selectionReason = hasPendingSelection && pendingSelectionReason_
+                        ? pendingSelectionReason_ : "retained existing candidate";
+                    return &previous->second;
+                }
+                selectionReason = "previous candidate outside viewport";
+            }
+        }
+
+        const SectionImage* bestImage = nullptr;
+        double bestIntersectionArea = 0.0;
+        for (const auto& entry : images)
+        {
+            double intersectionArea = 0.0;
+            if (!GetIntersectionArea(entry.second, visibleWorld, intersectionArea) ||
+                (bestImage && intersectionArea <= bestIntersectionArea)) continue;
+            bestImage = &entry.second;
+            bestIntersectionArea = intersectionArea;
+        }
+        return bestImage;
+    }
+
+    /** Validates the provider's world bounds and computes their half-open visible intersection area. */
+    bool BuildingMapTarget::GetIntersectionArea(const SectionImage& image,
+        const MainMapBuildingLayer::WorldRect& visibleWorld, double& area) const noexcept
+    {
+        area = 0.0;
+        if (!std::isfinite(image.XMapUnits) || !std::isfinite(image.YMapUnits) ||
+            !std::isfinite(image.SectionSizeMapUnits) || image.SectionSizeMapUnits <= 0.0) return false;
+        const double sectionMaxX = image.XMapUnits + image.SectionSizeMapUnits;
+        const double sectionMaxY = image.YMapUnits + image.SectionSizeMapUnits;
+        if (!std::isfinite(sectionMaxX) || !std::isfinite(sectionMaxY)) return false;
+        const double overlapX = (std::min)(sectionMaxX, visibleWorld.maxX) -
+            (std::max)(image.XMapUnits, visibleWorld.minX);
+        const double overlapY = (std::min)(sectionMaxY, visibleWorld.maxY) -
+            (std::max)(image.YMapUnits, visibleWorld.minY);
+        if (!std::isfinite(overlapX) || !std::isfinite(overlapY) || overlapX <= 0.0 || overlapY <= 0.0)
+            return false;
+        area = overlapX * overlapY;
+        return std::isfinite(area) && area > 0.0;
     }
 
     /** Moves every staged lease into the pending owner without losing failed releases. */
@@ -556,8 +637,11 @@ namespace MainMapBuildingMap
     }
 
     /** Commits the coordinate, revision, and published world bounds paired with the target. */
-    void BuildingMapTarget::SetSelectedImage(const SectionImage& image) noexcept
+    void BuildingMapTarget::SetSelectedImage(const SectionImage& image,
+        const char* selectionReason) noexcept
     {
+        const SectionTargetInfo oldInfo = targetInfo_;
+        const bool hadOldTarget = ready_;
         targetInfo_.GridX = image.GridX;
         targetInfo_.GridY = image.GridY;
         targetInfo_.XMapUnits = image.XMapUnits;
@@ -565,8 +649,30 @@ namespace MainMapBuildingMap
         targetInfo_.SectionSizeMapUnits = image.SectionSizeMapUnits;
         targetInfo_.Width = static_cast<int32_t>(image.Width);
         targetInfo_.Height = static_cast<int32_t>(image.Height);
+        targetInfo_.Revision = image.Revision;
         revision_ = image.Revision;
         ready_ = true;
         status_ = Status::Ready;
+        if (!firstCompositionLogged_)
+        {
+            LOG_INFO("MainMap diagnostics: first Section composition succeeded grid=%lld,%lld revision=%llu",
+                static_cast<long long>(image.GridX), static_cast<long long>(image.GridY),
+                static_cast<unsigned long long>(image.Revision));
+            firstCompositionLogged_ = true;
+        }
+        if (!hadOldTarget || oldInfo.GridX != image.GridX || oldInfo.GridY != image.GridY)
+        {
+            LOG_INFO("MainMap diagnostics: selected visible Section grid=%lld,%lld reason=%s",
+                static_cast<long long>(image.GridX), static_cast<long long>(image.GridY),
+                selectionReason ? selectionReason : "selection reason unavailable");
+        }
+        if (hadOldTarget && (oldInfo.GridX != image.GridX || oldInfo.GridY != image.GridY ||
+            oldInfo.Revision != image.Revision))
+        {
+            LOG_INFO("MainMap diagnostics: composition target changed old=%lld,%lld revision=%llu new=%lld,%lld revision=%llu",
+                static_cast<long long>(oldInfo.GridX), static_cast<long long>(oldInfo.GridY),
+                static_cast<unsigned long long>(oldInfo.Revision), static_cast<long long>(image.GridX),
+                static_cast<long long>(image.GridY), static_cast<unsigned long long>(image.Revision));
+        }
     }
 }

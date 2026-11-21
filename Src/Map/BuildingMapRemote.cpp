@@ -3,6 +3,7 @@
 #include "BuildingMapRemote.h"
 
 #include "Native/NativeApi.h"
+#include "plugin_helpers.h"
 
 #include <Windows.h>
 
@@ -350,6 +351,7 @@ namespace MainMapBuildingMap
         image.RowStride = metadata.RowStride;
         image.ByteCount = metadata.ByteCount;
         image.Revision = lastImageRevision_ + 1;
+        const uint64_t acceptedRevision = image.Revision;
         try
         {
             image.Pixels = copyBuffer_;
@@ -361,6 +363,13 @@ namespace MainMapBuildingMap
         }
         lastImageRevision_ += 1;
         imagesChanged_ = true;
+        if (!firstImageAvailabilityLogged_)
+        {
+            LOG_INFO("MainMap diagnostics: first completed remote image available grid=%lld,%lld revision=%llu",
+                static_cast<long long>(metadata.GridX), static_cast<long long>(metadata.GridY),
+                static_cast<unsigned long long>(acceptedRevision));
+            firstImageAvailabilityLogged_ = true;
+        }
         return true;
     }
 

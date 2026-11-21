@@ -100,5 +100,6 @@ namespace MainMapBuildingMap
         Availability availability_ = Availability::ProviderUnavailable;
         bool tableAvailable_ = false;
         bool imagesChanged_ = false;
+        bool firstImageAvailabilityLogged_ = false;
     };
 }

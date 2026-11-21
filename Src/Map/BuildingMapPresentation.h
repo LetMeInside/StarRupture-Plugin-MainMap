@@ -30,7 +30,7 @@ namespace MainMapBuildingMap
             SDK::UCanvasPanel* canvas, SDK::UWidgetTree* tree, const SectionTargetInfo& targetInfo,
             bool targetReady, bool materialResourcesReady);
         /** Detaches the image and releases its retained objects in dependency order. */
-        static bool RetireShared() noexcept;
+        static bool RetireShared(bool widgetDestructionStarted = false) noexcept;
 
     private:
         /** Restricts ownership to the one process-lifetime instance used by BuildingLayer. */
@@ -81,7 +81,11 @@ namespace MainMapBuildingMap
         /** Makes the validated image visible without intercepting native map input. */
         bool ShowImage() noexcept;
         /** Cleans up every retained UObject while preserving leases after rejected releases. */
-        bool Retire() noexcept;
+        bool Retire(bool widgetDestructionStarted) noexcept;
+        /** Reports a retirement failure once while its exact stage stays unchanged. */
+        void LogRetirementFailure(const char* stage) noexcept;
+        /** Releases the MID before target leases after its image brush is detached. */
+        bool ReleaseDetachedResources(bool fullRetirement) noexcept;
         /** Returns the existing dynamic presentation material, if it has been retained. */
         SDK::UMaterialInstanceDynamic* MaterialInstance() const noexcept;
         /** Returns the existing retained UImage, if one has been created. */
@@ -95,8 +99,13 @@ namespace MainMapBuildingMap
         MainMapNative::StrongObjectLease retiredTarget_;
         SectionTargetInfo presentedInfo_{};
         uint64_t epoch_ = 0;
+        const char* retirementFailureStage_ = nullptr;
         bool materialLoadAttempted_ = false;
+        bool materialInstanceAttempted_ = false;
         bool materialValidated_ = false;
         bool presentedTargetValid_ = false;
+        bool widgetDetached_ = false;
+        bool materialInstanceDetached_ = false;
+        bool firstAttachmentLogged_ = false;
     };
 }
