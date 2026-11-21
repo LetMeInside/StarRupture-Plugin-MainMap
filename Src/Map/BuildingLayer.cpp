@@ -1,5 +1,7 @@
 #include "BuildingLayer.h"
 #include "BuildingMapRemote.h"
+#include "BuildingMapTarget.h"
+#include "RenderingProof.h"
 #include "Native/NativeApi.h"
 #include "ChimeraUI_classes.hpp"
 #include "WBP_MapMenuMapArea_classes.hpp"
@@ -206,7 +208,14 @@ namespace
                 &session,"native-admission-closed");
             return false;
         }
-        // Retire the BCT1 consumer before terrain dependencies in RenderingProof.
+        if (!MainMapBuildingMap::BuildingMapTarget::RetireShared())
+        {
+            LogSessionGate(session.diagnosticCleanupDeferrals,2,"terrain session cleanup deferred",
+                &session,"composition-resource-release-rejected");
+            return false;
+        }
+        g_buildingMapRemote.CloseViewport();
+        // Retire the Section composition before releasing terrain dependencies.
         // Preserve every terrain lease if any release is rejected.
         if (!session.owningMenu.Reset() || !session.canvas.Reset() ||
             !session.terrain.Reset() || !session.world.Reset())
@@ -239,6 +248,7 @@ namespace
                 static_cast<unsigned long long>(g_session->epoch),g_session->world.Get(),reason);
         }
         g_session->closing=true;
+        MainMapBuildingMap::BuildingMapTarget::RetireShared();
         g_buildingMapRemote.CloseViewport();
         Cleanup();
     }
@@ -508,11 +518,15 @@ namespace MainMapBuildingLayer
         MainMapBuildingLayer::WorldRect visibleWorld{};
         if (!TryGetVisibleWorldRect(visibleWorld))
         {
+            MainMapBuildingMap::BuildingMapTarget::RetireShared();
             g_buildingMapRemote.CloseViewport();
             return;
         }
         g_buildingMapRemote.UpdateViewport(visibleWorld.minX, visibleWorld.minY,
             visibleWorld.maxX - visibleWorld.minX, visibleWorld.maxY - visibleWorld.minY);
+        MainMapBuildingMap::BuildingMapTarget::UpdateShared(static_cast<SDK::UObject*>(session.world.Get()),
+            g_buildingMapRemote.Images(),
+            MainMapRenderingProof::RenderingProof::IsMaterialContainerReady());
     }
 
     void WorldBeginPlay(SDK::UWorld* world)
@@ -542,6 +556,7 @@ namespace MainMapBuildingLayer
     {
         if (g_stopping.exchange(true)) return;
         Close("shutdown");
+        MainMapBuildingMap::BuildingMapTarget::RetireShared();
         g_buildingMapRemote.Shutdown();
         const auto outstanding=MainMapNative::OutstandingLeaseCount();
         if (outstanding!=0)

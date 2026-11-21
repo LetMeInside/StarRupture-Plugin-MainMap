@@ -82,6 +82,7 @@ namespace
                     }
                     else
                     {
+                        MainMapRenderingProof::RenderingProof::RecordMaterialContainerReadiness(true);
                         LOG_INFO("MainMap diagnostics: material container mount accepted name=ExternalMapMaterials handle=%p",g_pakHandle);
                     }
                 }
@@ -92,6 +93,20 @@ namespace
 
 namespace MainMapRenderingProof
 {
+    bool RenderingProof::materialContainerReady_ = false;
+
+    /** Reports the accepted status of the existing one-time embedded resource mount. */
+    bool RenderingProof::IsMaterialContainerReady() noexcept
+    {
+        return materialContainerReady_ && g_pakHandle != 0;
+    }
+
+    /** Records the existing mount result without creating another mount path. */
+    void RenderingProof::RecordMaterialContainerReadiness(bool ready) noexcept
+    {
+        materialContainerReady_ = ready;
+    }
+
     bool Initialize()
     {
         auto* engine = g_self->hooks->Engine;
@@ -107,6 +122,7 @@ namespace MainMapRenderingProof
         world->RegisterOnBeforeWorldEndPlay(BeforeWorldEnd);
         world->RegisterOnWorldBeginPlay(OnWorldBeginPlay);
         g_resourceSetupAttempted = false;
+        RenderingProof::RecordMaterialContainerReadiness(false);
         g_pakHandle = 0;
         engine->RegisterOnTick(OnTick);
         g_registered = true;
