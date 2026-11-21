@@ -1,6 +1,7 @@
 #include "BuildingLayer.h"
 #include "BuildingMapRemote.h"
 #include "BuildingMapTarget.h"
+#include "BuildingMapPresentation.h"
 #include "RenderingProof.h"
 #include "Native/NativeApi.h"
 #include "ChimeraUI_classes.hpp"
@@ -208,6 +209,12 @@ namespace
                 &session,"native-admission-closed");
             return false;
         }
+        if (!MainMapBuildingMap::BuildingMapPresentation::RetireShared())
+        {
+            LogSessionGate(session.diagnosticCleanupDeferrals,3,"terrain session cleanup deferred",
+                &session,"presentation-resource-release-rejected");
+            return false;
+        }
         if (!MainMapBuildingMap::BuildingMapTarget::RetireShared())
         {
             LogSessionGate(session.diagnosticCleanupDeferrals,2,"terrain session cleanup deferred",
@@ -248,8 +255,6 @@ namespace
                 static_cast<unsigned long long>(g_session->epoch),g_session->world.Get(),reason);
         }
         g_session->closing=true;
-        MainMapBuildingMap::BuildingMapTarget::RetireShared();
-        g_buildingMapRemote.CloseViewport();
         Cleanup();
     }
 
@@ -518,7 +523,8 @@ namespace MainMapBuildingLayer
         MainMapBuildingLayer::WorldRect visibleWorld{};
         if (!TryGetVisibleWorldRect(visibleWorld))
         {
-            MainMapBuildingMap::BuildingMapTarget::RetireShared();
+            if (!MainMapBuildingMap::BuildingMapPresentation::RetireShared()) return;
+            if (!MainMapBuildingMap::BuildingMapTarget::RetireShared()) return;
             g_buildingMapRemote.CloseViewport();
             return;
         }
@@ -527,6 +533,22 @@ namespace MainMapBuildingLayer
         MainMapBuildingMap::BuildingMapTarget::UpdateShared(static_cast<SDK::UObject*>(session.world.Get()),
             g_buildingMapRemote.Images(),
             MainMapRenderingProof::RenderingProof::IsMaterialContainerReady());
+        MainMapBuildingLayer::ConsumerContext context{};
+        SDK::UCanvasPanel* presentationCanvas=nullptr;
+        SDK::UWidgetTree* presentationTree=nullptr;
+        if (!TryGetConsumerContext(context) || !TryGetTilePresentationContext(presentationCanvas,presentationTree))
+        {
+            if (!MainMapBuildingMap::BuildingMapPresentation::RetireShared()) return;
+            if (!MainMapBuildingMap::BuildingMapTarget::RetireShared()) return;
+            g_buildingMapRemote.CloseViewport();
+            return;
+        }
+        const auto& target=MainMapBuildingMap::BuildingMapTarget::GetShared();
+        if (!MainMapBuildingMap::BuildingMapPresentation::UpdateShared(context,presentationCanvas,presentationTree,
+            target.GetTargetInfo(),target.IsReady(),
+            MainMapRenderingProof::RenderingProof::IsMaterialContainerReady()))
+            LogSessionGate(session.diagnosticTickBlocks,10,"Building Map presentation update failed",
+                &session,"resource-or-geometry-update-rejected");
     }
 
     void WorldBeginPlay(SDK::UWorld* world)
@@ -556,7 +578,9 @@ namespace MainMapBuildingLayer
     {
         if (g_stopping.exchange(true)) return;
         Close("shutdown");
-        MainMapBuildingMap::BuildingMapTarget::RetireShared();
+        const bool presentationRetired=MainMapBuildingMap::BuildingMapPresentation::RetireShared();
+        if (presentationRetired && MainMapBuildingMap::BuildingMapTarget::RetireShared() && g_session)
+            Cleanup();
         g_buildingMapRemote.Shutdown();
         const auto outstanding=MainMapNative::OutstandingLeaseCount();
         if (outstanding!=0)
