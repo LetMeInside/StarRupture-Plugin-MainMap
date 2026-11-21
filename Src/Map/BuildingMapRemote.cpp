@@ -334,6 +334,11 @@ namespace MainMapBuildingMap
             return true;
         }
 
+        if (lastImageRevision_ == (std::numeric_limits<uint64_t>::max)())
+        {
+            return false;
+        }
+
         SectionImage image{};
         image.GridX = metadata.GridX;
         image.GridY = metadata.GridY;
@@ -344,6 +349,7 @@ namespace MainMapBuildingMap
         image.Height = metadata.Height;
         image.RowStride = metadata.RowStride;
         image.ByteCount = metadata.ByteCount;
+        image.Revision = lastImageRevision_ + 1;
         try
         {
             image.Pixels = copyBuffer_;
@@ -353,6 +359,7 @@ namespace MainMapBuildingMap
         {
             return false;
         }
+        lastImageRevision_ += 1;
         imagesChanged_ = true;
         return true;
     }

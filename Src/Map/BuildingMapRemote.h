@@ -23,6 +23,7 @@ namespace MainMapBuildingMap
         uint32_t Height = 0;
         uint64_t RowStride = 0;
         uint64_t ByteCount = 0;
+        uint64_t Revision = 0;
         std::vector<uint8_t> Pixels;
     };
 
@@ -95,6 +96,7 @@ namespace MainMapBuildingMap
         BuildingMapViewportHandle viewport_ = 0;
         ImageCollection images_;
         std::vector<uint8_t> copyBuffer_;
+        uint64_t lastImageRevision_ = 0;
         Availability availability_ = Availability::ProviderUnavailable;
         bool tableAvailable_ = false;
         bool imagesChanged_ = false;
