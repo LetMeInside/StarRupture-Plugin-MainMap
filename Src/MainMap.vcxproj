@@ -97,6 +97,7 @@
     <ClInclude Include="Config\Config.h" />
     <ClInclude Include="Map\BuildingLayer.h" />
     <ClInclude Include="Map\BuildingMapRemote.h" />
+    <ClInclude Include="Map\BuildingMapGridPlanner.h" />
     <ClInclude Include="Map\BuildingMapTarget.h" />
     <ClInclude Include="Map\BuildingMapPresentation.h" />
     <ClInclude Include="Map\MaterialProof.h" />
@@ -122,6 +123,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)' != 'Client Debug' And '$(Configuration)' != 'Client Release'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="Map\BuildingMapRemote.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)' != 'Client Debug' And '$(Configuration)' != 'Client Release'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="Map\BuildingMapGridPlanner.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)' != 'Client Debug' And '$(Configuration)' != 'Client Release'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="Map\BuildingMapTarget.cpp">

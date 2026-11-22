@@ -9,7 +9,6 @@
 
 #include <algorithm>
 #include <limits>
-#include <set>
 
 namespace MainMapBuildingMap
 {
@@ -189,6 +188,7 @@ namespace MainMapBuildingMap
     void BuildingMapRemote::UpdateViewport(double xMapUnits, double yMapUnits,
         double widthMapUnits, double heightMapUnits)
     {
+        pollState_ = PollState::Incomplete;
         if (!IsAdmittedGameThread())
         {
             availability_ = Availability::Failure;
@@ -273,10 +273,11 @@ namespace MainMapBuildingMap
         return true;
     }
 
-    /** Polls bounded viewport cells and removes departed or currently absent images after success. */
+    /** Polls bounded cells and commits availability/removal observations only after full success. */
     bool BuildingMapRemote::PollVisibleImages(uint64_t visibleWidth, uint64_t visibleHeight)
     {
-        std::set<std::pair<int64_t, int64_t>> observedImages;
+        observedImageScratch_.clear();
+        noImageScratch_.clear();
         for (uint64_t localY = 0; localY < visibleHeight; ++localY)
         {
             for (uint64_t localX = 0; localX < visibleWidth; ++localX)
@@ -285,25 +286,53 @@ namespace MainMapBuildingMap
                 const auto result = CopySectionImage(localX, localY, metadata);
                 if (result == BUILDING_MAP_ABI_NO_IMAGE)
                 {
+                    noImageScratch_.emplace_back(metadata.GridX, metadata.GridY);
                     continue;
                 }
                 if (result != BUILDING_MAP_ABI_OK || !StoreChangedImage(metadata))
                 {
                     return false;
                 }
-                observedImages.emplace(metadata.GridX, metadata.GridY);
+                observedImageScratch_.emplace_back(metadata.GridX, metadata.GridY);
             }
         }
 
+        if (!ValidatePollCoordinates()) return false;
+
         for (auto image = images_.begin(); image != images_.end();)
         {
-            if (observedImages.find(image->first) == observedImages.end())
+            if (!std::binary_search(observedImageScratch_.begin(), observedImageScratch_.end(), image->first))
             {
                 image = images_.erase(image);
                 imagesChanged_ = true;
+                if (!AdvanceSourceObservationRevision()) return false;
                 continue;
             }
             ++image;
+        }
+        if (noImageSections_ != noImageScratch_)
+        {
+            if (!AdvanceSourceObservationRevision()) return false;
+            noImageSections_.swap(noImageScratch_);
+        }
+        pollState_ = PollState::Complete;
+        return true;
+    }
+
+    /** Sorts both source-state sets and rejects duplicates or contradictory cell outcomes. */
+    bool BuildingMapRemote::ValidatePollCoordinates()
+    {
+        std::sort(observedImageScratch_.begin(), observedImageScratch_.end());
+        std::sort(noImageScratch_.begin(), noImageScratch_.end());
+        if (std::adjacent_find(observedImageScratch_.begin(), observedImageScratch_.end()) !=
+            observedImageScratch_.end()) return false;
+        if (std::adjacent_find(noImageScratch_.begin(), noImageScratch_.end()) != noImageScratch_.end())
+        {
+            return false;
+        }
+        for (const SectionCoordinate& coordinate : observedImageScratch_)
+        {
+            if (std::binary_search(noImageScratch_.begin(), noImageScratch_.end(), coordinate)) return false;
         }
         return true;
     }
@@ -363,6 +392,7 @@ namespace MainMapBuildingMap
         }
         lastImageRevision_ += 1;
         imagesChanged_ = true;
+        if (!AdvanceSourceObservationRevision()) return false;
         if (!firstImageAvailabilityLogged_)
         {
             LOG_INFO("MainMap diagnostics: first completed remote image available grid=%lld,%lld revision=%llu",
@@ -466,11 +496,14 @@ namespace MainMapBuildingMap
     /** Clears images and reports the removal of an existing visible image set. */
     void BuildingMapRemote::ClearImages() noexcept
     {
-        if (!images_.empty())
+        if (!images_.empty() || !noImageSections_.empty())
         {
             images_.clear();
+            noImageSections_.clear();
             imagesChanged_ = true;
+            AdvanceSourceObservationRevision();
         }
+        pollState_ = PollState::Unavailable;
     }
 
     /** Disposes a collector created before a failed viewport open only if it remains valid. */
@@ -516,5 +549,31 @@ namespace MainMapBuildingMap
     BuildingMapRemote::Availability BuildingMapRemote::GetAvailability() const noexcept
     {
         return availability_;
+    }
+
+    /** Returns whether a full visible-cell snapshot was accepted by the most recent poll. */
+    BuildingMapRemote::PollState BuildingMapRemote::GetPollState() const noexcept
+    {
+        return pollState_;
+    }
+
+    /** Exposes the bounded coordinate set that explicitly returned NO_IMAGE. */
+    const BuildingMapRemote::NoImageCollection& BuildingMapRemote::NoImageSections() const noexcept
+    {
+        return noImageSections_;
+    }
+
+    /** Exposes a monotonic local token for source additions, revisions, and departures. */
+    uint64_t BuildingMapRemote::GetSourceObservationRevision() const noexcept
+    {
+        return sourceObservationRevision_;
+    }
+
+    /** Advances the source token without allowing identity wraparound. */
+    bool BuildingMapRemote::AdvanceSourceObservationRevision() noexcept
+    {
+        if (sourceObservationRevision_ == (std::numeric_limits<uint64_t>::max)()) return false;
+        ++sourceObservationRevision_;
+        return true;
     }
 }

@@ -1,4 +1,8 @@
+// Owns native terrain admission, clipped world geometry, and composite-grid presentation ordering.
 #include "BuildingLayer.h"
+#if defined(_DEBUG)
+#include "BuildingMapGeometryDiagnostics.h"
+#endif
 #include "BuildingMapRemote.h"
 #include "BuildingMapTarget.h"
 #include "BuildingMapPresentation.h"
@@ -214,6 +218,12 @@ namespace
         {
             LogSessionGate(session.diagnosticCleanupDeferrals,3,"terrain session cleanup deferred",
                 &session,"presentation-resource-release-rejected");
+            return false;
+        }
+        if (!MainMapBuildingMap::BuildingMapTarget::InvalidateGridPlanInputShared())
+        {
+            LogSessionGate(session.diagnosticCleanupDeferrals, 4, "terrain session cleanup deferred",
+                &session, "grid-resource-release-rejected");
             return false;
         }
         if (!MainMapBuildingMap::BuildingMapTarget::RetireShared())
@@ -503,6 +513,7 @@ namespace MainMapBuildingLayer
         return false;
     }
 
+    /** Advances the admitted terrain session and overlay, with automatic geometry sampling in Client Debug. */
     void Tick()
     {
         if (!MainMapNative::CanOperate())
@@ -531,28 +542,56 @@ namespace MainMapBuildingLayer
         if (!TryGetVisibleWorldRect(visibleWorld))
         {
             if (!MainMapBuildingMap::BuildingMapPresentation::RetireShared()) return;
+            MainMapBuildingMap::BuildingMapTarget::InvalidateGridPlanInputShared();
             if (!MainMapBuildingMap::BuildingMapTarget::RetireShared()) return;
             g_buildingMapRemote.CloseViewport();
             return;
         }
         g_buildingMapRemote.UpdateViewport(visibleWorld.minX, visibleWorld.minY,
             visibleWorld.maxX - visibleWorld.minX, visibleWorld.maxY - visibleWorld.minY);
-        MainMapBuildingMap::BuildingMapTarget::UpdateShared(static_cast<SDK::UObject*>(session.world.Get()),
-            g_buildingMapRemote.Images(), visibleWorld,
-            MainMapRenderingProof::RenderingProof::IsMaterialContainerReady());
         MainMapBuildingLayer::ConsumerContext context{};
         SDK::UCanvasPanel* presentationCanvas=nullptr;
         SDK::UWidgetTree* presentationTree=nullptr;
         if (!TryGetConsumerContext(context) || !TryGetTilePresentationContext(presentationCanvas,presentationTree))
         {
             if (!MainMapBuildingMap::BuildingMapPresentation::RetireShared()) return;
+            MainMapBuildingMap::BuildingMapTarget::InvalidateGridPlanInputShared();
             if (!MainMapBuildingMap::BuildingMapTarget::RetireShared()) return;
             g_buildingMapRemote.CloseViewport();
             return;
         }
-        const auto& target=MainMapBuildingMap::BuildingMapTarget::GetShared();
-        if (!MainMapBuildingMap::BuildingMapPresentation::UpdateShared(context,presentationCanvas,presentationTree,
-            target.GetTargetInfo(),target.IsReady(),
+        const bool gridPlanCurrent = MainMapBuildingMap::BuildingMapTarget::UpdateGridPlanShared(
+            visibleWorld, session.epoch);
+        if (gridPlanCurrent)
+        {
+            MainMapBuildingMap::BuildingMapTarget::ReconcileGridSourcesShared(
+                g_buildingMapRemote, session.epoch);
+        }
+        const auto& gridPlanner = MainMapBuildingMap::BuildingMapTarget::GetGridPlannerShared();
+        const bool sourceSnapshotCurrent =
+            g_buildingMapRemote.GetPollState() == MainMapBuildingMap::BuildingMapRemote::PollState::Complete &&
+            MainMapBuildingMap::BuildingMapTarget::HasCurrentGridSourcesShared();
+        const bool presentationPrepared =
+            MainMapBuildingMap::BuildingMapPresentation::PrepareGridUpdateShared(
+                session.epoch, gridPlanner.Assignments(), sourceSnapshotCurrent);
+        if (gridPlanCurrent && presentationPrepared)
+        {
+            MainMapBuildingMap::BuildingMapTarget::PrepareGridCompositesShared(
+                static_cast<SDK::UObject*>(session.world.Get()), g_buildingMapRemote,
+                session.epoch, MainMapRenderingProof::RenderingProof::IsMaterialContainerReady());
+        }
+        if (!gridPlanCurrent && presentationPrepared)
+            MainMapBuildingMap::BuildingMapTarget::RetireShared();
+#if defined(_DEBUG)
+        MainMapBuildingMap::BuildingMapGeometryDiagnostics::Sample(terrain,context,visibleWorld);
+#endif
+        if (!presentationPrepared && sourceSnapshotCurrent)
+        {
+            return;
+        }
+        const auto compositeTargets = MainMapBuildingMap::BuildingMapTarget::GetCompositeTargetInfosShared();
+        if (!MainMapBuildingMap::BuildingMapPresentation::UpdateGridShared(context, visibleWorld,
+            presentationCanvas, presentationTree, compositeTargets, sourceSnapshotCurrent,
             MainMapRenderingProof::RenderingProof::IsMaterialContainerReady()))
             LogSessionGate(session.diagnosticTickBlocks,10,"Building Map presentation update failed",
                 &session,"resource-or-geometry-update-rejected");

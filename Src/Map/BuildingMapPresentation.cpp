@@ -1,5 +1,5 @@
-// Presents BuildingMapTarget's retained Section target on the terrain widget's own canvas.
-// The single UImage and every UObject it references remain strongly leased until admitted retirement.
+// Presents BuildingMapTarget's six retained composite assignments on the terrain widget's own canvas.
+// Each slot's UImage, MID, and target dependencies remain strongly leased until admitted retirement.
 #include "BuildingMapPresentation.h"
 
 #include "ChimeraUI_classes.hpp"
@@ -24,12 +24,26 @@ namespace MainMapBuildingMap
         return *presentation;
     }
 
-    /** Updates the visible Section presentation without advancing provider or composition work. */
-    bool BuildingMapPresentation::UpdateShared(const MainMapBuildingLayer::ConsumerContext& context,
-        SDK::UCanvasPanel* canvas, SDK::UWidgetTree* tree, const SectionTargetInfo& targetInfo,
-        bool targetReady, bool materialResourcesReady)
+    /** Withdraws stale grid publications before Stage 3D-C can clear or redraw their target textures. */
+    bool BuildingMapPresentation::PrepareGridUpdateShared(std::uint64_t sessionEpoch,
+        const std::array<BuildingMapGridPlanner::SlotAssignment,
+            BuildingMapGridPlanner::kPhysicalSlotCount>& assignments,
+        bool sourceSnapshotCurrent) noexcept
     {
-        return SharedOwner().Update(context, canvas, tree, targetInfo, targetReady, materialResourcesReady);
+        return SharedOwner().PrepareGridUpdate(sessionEpoch, assignments, sourceSnapshotCurrent);
+    }
+
+    /** Publishes eligible composite targets and updates world geometry only when its input changes. */
+    bool BuildingMapPresentation::UpdateGridShared(
+        const MainMapBuildingLayer::ConsumerContext& context,
+        const MainMapBuildingLayer::WorldRect& visibleWorld, SDK::UCanvasPanel* canvas,
+        SDK::UWidgetTree* tree,
+        const std::array<BuildingMapTarget::CompositeTargetInfo,
+            BuildingMapGridPlanner::kPhysicalSlotCount>& targets,
+        bool sourceSnapshotCurrent, bool materialResourcesReady)
+    {
+        return SharedOwner().UpdateGrid(context, visibleWorld, canvas, tree, targets,
+            sourceSnapshotCurrent, materialResourcesReady);
     }
 
     /** Detaches the image and releases the shared presentation owner through admitted operations. */
@@ -69,6 +83,908 @@ namespace MainMapBuildingMap
         }
         return SynchronizeTarget(targetInfo, position, size);
     }
+
+    /** Retires stale slots before composition and preserves matching clean publications. */
+    bool BuildingMapPresentation::PrepareGridUpdate(std::uint64_t sessionEpoch,
+        const std::array<BuildingMapGridPlanner::SlotAssignment,
+            BuildingMapGridPlanner::kPhysicalSlotCount>& assignments,
+        bool sourceSnapshotCurrent) noexcept
+    {
+        if (!MainMapNative::CanOperate() || !MainMapNative::IsGameThread() || !sessionEpoch) return false;
+        if (epoch_ && epoch_ != sessionEpoch && !Retire(false)) return false;
+        epoch_ = sessionEpoch;
+        for (std::size_t slotIndex = 0; slotIndex < gridSlots_.size(); ++slotIndex)
+        {
+            const auto& assignment = assignments[slotIndex];
+            if (!assignment.IsAssigned)
+            {
+                if (!WithdrawGridSlot(slotIndex)) return false;
+                ReleaseGridSlotTargets(slotIndex);
+                continue;
+            }
+            const GridPresentationSlot& slot = gridSlots_[slotIndex];
+            const bool assignmentChanged = slot.HasPublication &&
+                (slot.SessionEpoch != assignment.SessionEpoch ||
+                    slot.AssignmentGeneration != assignment.AssignmentGeneration ||
+                    slot.Tile.GroupingN != assignment.Tile.GroupingN ||
+                    slot.Tile.X != assignment.Tile.X || slot.Tile.Y != assignment.Tile.Y);
+            if (!sourceSnapshotCurrent || assignment.IsDirty || assignmentChanged)
+            {
+                if (!WithdrawGridSlot(slotIndex)) return false;
+            }
+        }
+        return true;
+    }
+
+    /** Publishes only committed clean assignments and remaps geometry after viewport changes. */
+    bool BuildingMapPresentation::UpdateGrid(const MainMapBuildingLayer::ConsumerContext& context,
+        const MainMapBuildingLayer::WorldRect& visibleWorld, SDK::UCanvasPanel* canvas,
+        SDK::UWidgetTree* tree,
+        const std::array<BuildingMapTarget::CompositeTargetInfo,
+            BuildingMapGridPlanner::kPhysicalSlotCount>& targets,
+        bool sourceSnapshotCurrent, bool materialResourcesReady)
+    {
+        if (!MainMapNative::CanOperate() || !MainMapNative::IsGameThread() ||
+            !context.world || !context.epoch || !canvas || !tree) return false;
+        if (epoch_ && epoch_ != context.epoch && !Retire(false)) return false;
+        if (lastGridCanvasIdentity_ != 0 &&
+            (lastGridCanvasIdentity_ != reinterpret_cast<std::uintptr_t>(canvas) ||
+                lastGridTreeIdentity_ != reinterpret_cast<std::uintptr_t>(tree)))
+        {
+            if (!Retire(false)) return false;
+        }
+        epoch_ = context.epoch;
+        if (!sourceSnapshotCurrent || !materialResourcesReady)
+        {
+            for (std::size_t slotIndex = 0; slotIndex < gridSlots_.size(); ++slotIndex)
+            {
+                if (!WithdrawGridSlot(slotIndex)) return false;
+            }
+            return true;
+        }
+        bool hasEligibleSlot = false;
+        for (const auto& targetInfo : targets)
+        {
+            if (IsGridTargetEligible(context, targetInfo, sourceSnapshotCurrent))
+                hasEligibleSlot = true;
+        }
+        if (hasEligibleSlot && !EnsureGridParentMaterial(context.world, materialResourcesReady))
+        {
+#if defined(_DEBUG)
+            for (std::size_t slotIndex = 0; slotIndex < targets.size(); ++slotIndex)
+            {
+                if (IsGridTargetEligible(context, targets[slotIndex], sourceSnapshotCurrent))
+                {
+                    ReportGridFailure(slotIndex, targets[slotIndex].Assignment,
+                        targets[slotIndex], 7, "presentation-parent-material-failed");
+                    break;
+                }
+            }
+#endif
+            return false;
+        }
+        const bool geometryChanged = HasGridGeometryInputChanged(context, visibleWorld, canvas, tree);
+        bool succeeded = true;
+        for (std::size_t slotIndex = 0; slotIndex < targets.size(); ++slotIndex)
+        {
+            succeeded = UpdateGridSlot(context, canvas, tree, targets[slotIndex],
+                sourceSnapshotCurrent, geometryChanged) && succeeded;
+        }
+        StoreGridGeometryInput(context, visibleWorld, canvas, tree);
+        return succeeded;
+    }
+
+    /** Loads the packaged UI parent once without constructing the retired single-image MID. */
+    bool BuildingMapPresentation::EnsureGridParentMaterial(SDK::UObject* worldContext,
+        bool materialResourcesReady)
+    {
+        if (!worldContext || !materialResourcesReady) return false;
+        if (parentMaterial_ && materialValidated_) return true;
+        if (!parentMaterial_)
+        {
+            if (materialLoadAttempted_) return false;
+            materialLoadAttempted_ = true;
+            auto* parent = MainMapProof::LoadMaterial(
+                "/Game/Mods/MainMap/Materials/M_BuildingPresent.M_BuildingPresent",
+                SDK::EMaterialDomain::MD_UI, parentMaterial_);
+            if (!parent) return false;
+        }
+        materialValidated_ = true;
+        return true;
+    }
+
+    /** Updates one slot and hides it if its source, target, widget, or world mapping is invalid. */
+    bool BuildingMapPresentation::UpdateGridSlot(
+        const MainMapBuildingLayer::ConsumerContext& context, SDK::UCanvasPanel* canvas,
+        SDK::UWidgetTree* tree, const BuildingMapTarget::CompositeTargetInfo& targetInfo,
+        bool sourceSnapshotCurrent, bool geometryChanged)
+    {
+        const auto& assignment = targetInfo.Assignment;
+        const std::size_t slotIndex = assignment.PhysicalSlotIndex;
+        if (slotIndex >= gridSlots_.size()) return false;
+        if (!IsGridTargetEligible(context, targetInfo, sourceSnapshotCurrent))
+            return WithdrawGridSlot(slotIndex);
+        if (gridSlots_[slotIndex].retiredTarget) ReleaseRetiredGridTarget(slotIndex);
+        const bool alreadyPublished = MatchesGridPublication(slotIndex, targetInfo);
+        if (alreadyPublished && !geometryChanged && ValidateGridAttachment(slotIndex, canvas, tree))
+            return MaintainStationaryGridSlot(slotIndex, targetInfo);
+        SDK::FVector2D position{};
+        SDK::FVector2D size{};
+        if (!PrepareGridSlotGeometry(context, canvas, tree, targetInfo, position, size)) return false;
+        if (alreadyPublished)
+            return UpdatePublishedGridGeometry(slotIndex, targetInfo, position, size);
+        if (PublishGridSlot(slotIndex, targetInfo, position, size)) return true;
+#if defined(_DEBUG)
+        ReportGridFailure(slotIndex, assignment, targetInfo, 4, "target-binding-or-publication-failed");
+#endif
+        WithdrawGridSlot(slotIndex);
+        return false;
+    }
+
+    /** Ensures the slot attachment and maps world bounds before a new publication or pan/zoom update. */
+    bool BuildingMapPresentation::PrepareGridSlotGeometry(
+        const MainMapBuildingLayer::ConsumerContext& context, SDK::UCanvasPanel* canvas,
+        SDK::UWidgetTree* tree, const BuildingMapTarget::CompositeTargetInfo& targetInfo,
+        SDK::FVector2D& position, SDK::FVector2D& size)
+    {
+        const auto& assignment = targetInfo.Assignment;
+        const std::size_t slotIndex = assignment.PhysicalSlotIndex;
+        if (!EnsureGridSlotWidgets(slotIndex, canvas, tree, context.world, targetInfo))
+        {
+#if defined(_DEBUG)
+            ReportGridFailure(slotIndex, assignment, targetInfo, 1, "widget-attachment-failed");
+#endif
+            WithdrawGridSlot(slotIndex);
+            return false;
+        }
+        if (!MapGridBounds(context, canvas, assignment.Bounds, position, size))
+        {
+#if defined(_DEBUG)
+            ReportGridFailure(slotIndex, assignment, targetInfo, 2, "geometry-map-failed");
+#endif
+            WithdrawGridSlot(slotIndex);
+            return false;
+        }
+        return true;
+    }
+
+    /** Rebinds only when necessary and retains a clean stationary slot without geometry writes. */
+    bool BuildingMapPresentation::MaintainStationaryGridSlot(std::size_t slotIndex,
+        const BuildingMapTarget::CompositeTargetInfo& targetInfo)
+    {
+        auto* target = static_cast<SDK::UTextureRenderTarget2D*>(targetInfo.Target);
+        if (!IsGridTargetBound(slotIndex, target) && !BindGridTarget(slotIndex, target))
+        {
+#if defined(_DEBUG)
+            ReportGridFailure(slotIndex, targetInfo.Assignment, targetInfo, 4, "target-binding-failed");
+#endif
+            WithdrawGridSlot(slotIndex);
+            return false;
+        }
+        return ShowGridImage(slotIndex);
+    }
+
+    /** Applies changed Canvas geometry while keeping the exact content/assignment publication. */
+    bool BuildingMapPresentation::UpdatePublishedGridGeometry(std::size_t slotIndex,
+        const BuildingMapTarget::CompositeTargetInfo& targetInfo,
+        const SDK::FVector2D& position, const SDK::FVector2D& size)
+    {
+        if (ApplyGridGeometry(slotIndex, position, size)) return true;
+#if defined(_DEBUG)
+        ReportGridFailure(slotIndex, targetInfo.Assignment, targetInfo, 3, "geometry-apply-failed");
+#endif
+        WithdrawGridSlot(slotIndex);
+        return false;
+    }
+
+    /** Detects the live geometry inputs that can change a world-tile image's canvas rectangle. */
+    bool BuildingMapPresentation::HasGridGeometryInputChanged(
+        const MainMapBuildingLayer::ConsumerContext& context,
+        const MainMapBuildingLayer::WorldRect& visibleWorld, SDK::UCanvasPanel* canvas,
+        SDK::UWidgetTree* tree) const noexcept
+    {
+        return !hasGridGeometryInput_ || epoch_ != context.epoch ||
+            visibleWorld.minX != lastGridVisibleWorld_.minX ||
+            visibleWorld.minY != lastGridVisibleWorld_.minY ||
+            visibleWorld.maxX != lastGridVisibleWorld_.maxX ||
+            visibleWorld.maxY != lastGridVisibleWorld_.maxY ||
+            context.originX != lastGridOriginX_ || context.originY != lastGridOriginY_ ||
+            reinterpret_cast<std::uintptr_t>(canvas) != lastGridCanvasIdentity_ ||
+            reinterpret_cast<std::uintptr_t>(tree) != lastGridTreeIdentity_;
+    }
+
+    /** Stores exact successful world and canvas inputs for stationary-frame geometry suppression. */
+    void BuildingMapPresentation::StoreGridGeometryInput(
+        const MainMapBuildingLayer::ConsumerContext& context,
+        const MainMapBuildingLayer::WorldRect& visibleWorld, SDK::UCanvasPanel* canvas,
+        SDK::UWidgetTree* tree) noexcept
+    {
+        lastGridVisibleWorld_ = visibleWorld;
+        lastGridOriginX_ = context.originX;
+        lastGridOriginY_ = context.originY;
+        lastGridCanvasIdentity_ = reinterpret_cast<std::uintptr_t>(canvas);
+        lastGridTreeIdentity_ = reinterpret_cast<std::uintptr_t>(tree);
+        hasGridGeometryInput_ = true;
+    }
+
+    /** Creates or validates one stable MID and UImage for a physical composite slot. */
+    bool BuildingMapPresentation::EnsureGridSlotWidgets(std::size_t slotIndex,
+        SDK::UCanvasPanel* canvas, SDK::UWidgetTree* tree, SDK::UObject* worldContext,
+        const BuildingMapTarget::CompositeTargetInfo& targetInfo)
+    {
+        if (slotIndex >= gridSlots_.size() || !canvas || !tree || !worldContext ||
+            !parentMaterial_ || !materialValidated_) return false;
+        GridPresentationSlot& slot = gridSlots_[slotIndex];
+        if (!slot.materialInstance.Get())
+        {
+            auto* instance = SDK::UKismetMaterialLibrary::CreateDynamicMaterialInstance(
+                worldContext, static_cast<SDK::UMaterialInterface*>(parentMaterial_.Get()), {},
+                SDK::EMIDCreationFlags::None);
+            if (!instance || !instance->IsA(SDK::UMaterialInstanceDynamic::StaticClass()) ||
+                !slot.materialInstance.Acquire(instance)) return false;
+        }
+        auto* materialObject = slot.materialInstance.Get();
+        if (!materialObject || !materialObject->IsA(SDK::UMaterialInstanceDynamic::StaticClass()))
+            return false;
+        auto* material = static_cast<SDK::UMaterialInstanceDynamic*>(materialObject);
+        if (!slot.image.Get())
+        {
+            auto* object = SDK::UGameplayStatics::SpawnObject(SDK::UImage::StaticClass(), tree);
+            if (!object || !object->IsA(SDK::UImage::StaticClass()) || object->Outer != tree ||
+                !slot.image.Acquire(object)) return false;
+            auto* image = static_cast<SDK::UImage*>(object);
+            image->SetVisibility(SDK::ESlateVisibility::Collapsed);
+            image->SetColorAndOpacity({1, 1, 1, 1});
+        }
+        auto* image = static_cast<SDK::UImage*>(slot.image.Get());
+        if (!material || !image || image->Outer != tree) return false;
+        if (image->Brush.ResourceObject != material) image->SetBrushFromMaterial(material);
+        if (image->Brush.ResourceObject != material) return false;
+#if defined(_DEBUG)
+        const bool wasAttached = image->GetParent() == canvas;
+#endif
+        if (image->GetParent() != canvas)
+        {
+            if (image->GetParent() || image->Slot) return false;
+            auto* canvasSlot = canvas->AddChildToCanvas(image);
+            if (!canvasSlot || !canvasSlot->IsA(SDK::UCanvasPanelSlot::StaticClass()) ||
+                image->Slot != canvasSlot) return false;
+        }
+        slot.WidgetDetached = false;
+        const bool attached = ValidateGridAttachment(slotIndex, canvas, tree);
+#if defined(_DEBUG)
+        if (attached && !wasAttached)
+        {
+            LogGridSlotEvent(slotIndex, targetInfo.Assignment,
+                targetInfo.Assignment.CommittedContentGeneration, targetInfo.Target,
+                "slot-widget-attached");
+        }
+#endif
+        return attached;
+    }
+
+    /** Confirms the expected slot image, tree, canvas parent, CanvasPanelSlot, and MID brush. */
+    bool BuildingMapPresentation::ValidateGridAttachment(std::size_t slotIndex,
+        SDK::UCanvasPanel* canvas, SDK::UWidgetTree* tree) const noexcept
+    {
+        if (slotIndex >= gridSlots_.size() || !canvas || !tree) return false;
+        const auto& slot = gridSlots_[slotIndex];
+        auto* imageObject = slot.image.Get();
+        auto* materialObject = slot.materialInstance.Get();
+        if (!imageObject || !imageObject->IsA(SDK::UImage::StaticClass()) ||
+            !materialObject || !materialObject->IsA(SDK::UMaterialInstanceDynamic::StaticClass())) return false;
+        auto* image = static_cast<SDK::UImage*>(imageObject);
+        if (image->Outer != tree || image->GetParent() != canvas || !image->Slot ||
+            !image->Slot->IsA(SDK::UCanvasPanelSlot::StaticClass()) ||
+            image->Brush.ResourceObject != materialObject) return false;
+        auto* canvasSlot = static_cast<SDK::UCanvasPanelSlot*>(image->Slot);
+        return canvasSlot->Parent == canvas && canvasSlot->Content == image;
+    }
+
+    /** Maps exact signed composite bounds from terrain world centimetres into canvas local coordinates. */
+    bool BuildingMapPresentation::MapGridBounds(
+        const MainMapBuildingLayer::ConsumerContext& context, SDK::UCanvasPanel* canvas,
+        const BuildingMapGridPlanner::WorldBounds& bounds,
+        SDK::FVector2D& position, SDK::FVector2D& size) const
+    {
+        if (!canvas || bounds.MaxX <= bounds.MinX || bounds.MaxY <= bounds.MinY ||
+            !std::isfinite(context.originX) || !std::isfinite(context.originY)) return false;
+        auto* treeObject = canvas->Outer;
+        if (!treeObject || !treeObject->IsA(SDK::UWidgetTree::StaticClass())) return false;
+        auto* tree = static_cast<SDK::UWidgetTree*>(treeObject);
+        auto* terrainObject = tree->Outer;
+        if (!terrainObject || !terrainObject->IsA(SDK::UCrUW_MapMenuTerrain::StaticClass())) return false;
+        auto* terrain = static_cast<SDK::UCrUW_MapMenuTerrain*>(terrainObject);
+        if (terrain->WidgetTree != tree || terrain->CanvasPanelTerrain != canvas) return false;
+        const double localX = (static_cast<double>(bounds.MinX) - context.originX) / 100.0;
+        const double localY = (static_cast<double>(bounds.MinY) - context.originY) / 100.0;
+        const double localWidth = static_cast<double>(bounds.MaxX - bounds.MinX) / 100.0;
+        const double localHeight = static_cast<double>(bounds.MaxY - bounds.MinY) / 100.0;
+        if (!std::isfinite(localX) || !std::isfinite(localY) ||
+            !std::isfinite(localWidth) || !std::isfinite(localHeight) ||
+            localWidth <= 0.0 || localHeight <= 0.0) return false;
+        return MapAbsoluteBoundsToCanvas(canvas->GetPaintSpaceGeometry(),
+            terrain->GetPaintSpaceGeometry(), localX, localY, localWidth, localHeight,
+            position, size);
+    }
+
+    /** Applies explicit top-left position, world-derived size, and established overlay Z order. */
+    bool BuildingMapPresentation::ApplyGridGeometry(std::size_t slotIndex,
+        const SDK::FVector2D& position, const SDK::FVector2D& size)
+    {
+        if (slotIndex >= gridSlots_.size()) return false;
+        auto* imageObject = gridSlots_[slotIndex].image.Get();
+        if (!imageObject || !imageObject->IsA(SDK::UImage::StaticClass())) return false;
+        auto* image = static_cast<SDK::UImage*>(imageObject);
+        if (!image->Slot || !image->Slot->IsA(SDK::UCanvasPanelSlot::StaticClass())) return false;
+        auto* slot = static_cast<SDK::UCanvasPanelSlot*>(image->Slot);
+        const auto currentPosition = slot->GetPosition();
+        const auto currentSize = slot->GetSize();
+        const auto anchors = slot->GetAnchors();
+        const auto alignment = slot->GetAlignment();
+        if (!slot->GetAutoSize() && slot->GetZOrder() == 1 &&
+            anchors.Minimum.X == 0.0f && anchors.Minimum.Y == 0.0f &&
+            anchors.Maximum.X == 0.0f && anchors.Maximum.Y == 0.0f &&
+            alignment.X == 0.0f && alignment.Y == 0.0f &&
+            currentPosition.X == position.X && currentPosition.Y == position.Y &&
+            currentSize.X == size.X && currentSize.Y == size.Y) return true;
+        slot->SetAutoSize(false);
+        slot->SetAnchors({{0, 0}, {0, 0}});
+        slot->SetAlignment({0, 0});
+        slot->SetPosition(position);
+        slot->SetSize(size);
+        slot->SetZOrder(1);
+        return slot->GetPosition().X == position.X && slot->GetPosition().Y == position.Y &&
+            slot->GetSize().X == size.X && slot->GetSize().Y == size.Y &&
+            slot->GetZOrder() == 1 && !slot->GetAutoSize();
+    }
+
+    /** Binds one composite target to its slot MID and confirms the exact UObject readback. */
+    bool BuildingMapPresentation::BindGridTarget(std::size_t slotIndex,
+        SDK::UTextureRenderTarget2D* target)
+    {
+        if (slotIndex >= gridSlots_.size() || !target) return false;
+        auto* materialObject = gridSlots_[slotIndex].materialInstance.Get();
+        if (!materialObject || !materialObject->IsA(SDK::UMaterialInstanceDynamic::StaticClass())) return false;
+        auto* material = static_cast<SDK::UMaterialInstanceDynamic*>(materialObject);
+        const auto parameter = SDK::UKismetStringLibrary::Conv_StringToName(
+            SDK::FString(L"BuildingTarget"));
+        material->SetTextureParameterValue(parameter, target);
+        return material->K2_GetTextureParameterValue(parameter) == target;
+    }
+
+    /** Reads the slot's BuildingTarget parameter without changing its binding. */
+    bool BuildingMapPresentation::IsGridTargetBound(std::size_t slotIndex,
+        SDK::UTextureRenderTarget2D* target) const noexcept
+    {
+        if (slotIndex >= gridSlots_.size() || !target) return false;
+        auto* materialObject = gridSlots_[slotIndex].materialInstance.Get();
+        if (!materialObject || !materialObject->IsA(SDK::UMaterialInstanceDynamic::StaticClass())) return false;
+        auto* material = static_cast<SDK::UMaterialInstanceDynamic*>(materialObject);
+        const auto parameter = SDK::UKismetStringLibrary::Conv_StringToName(
+            SDK::FString(L"BuildingTarget"));
+        return material->K2_GetTextureParameterValue(parameter) == target;
+    }
+
+    /** Hides one slot and detaches its material before target clear, reassignment, or retirement. */
+    bool BuildingMapPresentation::WithdrawGridSlot(std::size_t slotIndex) noexcept
+    {
+        if (slotIndex >= gridSlots_.size()) return false;
+        if (!HideGridSlotImage(slotIndex) || !DetachGridSlotMaterial(slotIndex)) return false;
+        GridPresentationSlot& slot = gridSlots_[slotIndex];
+        if (slot.HasPublication)
+        {
+#if defined(_DEBUG)
+            BuildingMapGridPlanner::SlotAssignment assignment{};
+            assignment.PhysicalSlotIndex = static_cast<std::uint32_t>(slotIndex);
+            assignment.IsAssigned = true;
+            assignment.Tile = slot.Tile;
+            assignment.SessionEpoch = slot.SessionEpoch;
+            assignment.Bounds = slot.Bounds;
+            assignment.AssignmentGeneration = slot.AssignmentGeneration;
+            assignment.CommittedContentGeneration = slot.ContentGeneration;
+            LogGridSlotEvent(slotIndex, assignment, slot.ContentGeneration,
+                slot.target.Get(), "withdrawn");
+#endif
+            slot.HasPublication = false;
+            slot.Tile = {};
+            slot.Bounds = {};
+            slot.SessionEpoch = 0;
+            slot.AssignmentGeneration = 0;
+            slot.ContentGeneration = 0;
+        }
+        return true;
+    }
+
+    /** Collapses one slot's UImage and rejects a visibility change that did not take effect. */
+    bool BuildingMapPresentation::HideGridSlotImage(std::size_t slotIndex) noexcept
+    {
+        if (slotIndex >= gridSlots_.size()) return false;
+        auto* imageObject = gridSlots_[slotIndex].image.Get();
+        if (!imageObject) return true;
+        if (!imageObject->IsA(SDK::UImage::StaticClass()))
+        {
+#if defined(_DEBUG)
+            ReportGridSlotEvent(slotIndex, 9, imageObject, "widget-validation-failed");
+#endif
+            return false;
+        }
+        auto* image = static_cast<SDK::UImage*>(imageObject);
+        if (image->GetVisibility() != SDK::ESlateVisibility::Collapsed)
+            image->SetVisibility(SDK::ESlateVisibility::Collapsed);
+        if (image->GetVisibility() == SDK::ESlateVisibility::Collapsed) return true;
+#if defined(_DEBUG)
+        ReportGridSlotEvent(slotIndex, 9, imageObject, "widget-hide-failed");
+#endif
+        return false;
+    }
+
+    /** Clears the active UImage brush and releases its MID before target redraw or retirement. */
+    bool BuildingMapPresentation::DetachGridSlotMaterial(std::size_t slotIndex) noexcept
+    {
+        if (slotIndex >= gridSlots_.size()) return false;
+        auto* previousMaterial = gridSlots_[slotIndex].materialInstance.Get();
+        auto* imageObject = gridSlots_[slotIndex].image.Get();
+        if (imageObject && !imageObject->IsA(SDK::UImage::StaticClass()))
+        {
+#if defined(_DEBUG)
+            ReportGridSlotEvent(slotIndex, 9, imageObject, "widget-validation-failed");
+#endif
+            return false;
+        }
+        auto* image = static_cast<SDK::UImage*>(imageObject);
+        if (previousMaterial && !previousMaterial->IsA(SDK::UMaterialInstanceDynamic::StaticClass()))
+        {
+#if defined(_DEBUG)
+            ReportGridSlotEvent(slotIndex, 10, previousMaterial,
+                "presentation-material-validation-failed");
+#endif
+            return false;
+        }
+        if (!ClearGridSlotBrush(slotIndex, image) || !ReleaseGridSlotMaterial(slotIndex)) return false;
+#if defined(_DEBUG)
+        if (previousMaterial)
+            ReportGridSlotEvent(slotIndex, 0, nullptr, "presentation-mid-detached");
+#endif
+        return true;
+    }
+
+    /** Clears a slot image's material resource and reports whether an old target remained exposed. */
+    bool BuildingMapPresentation::ClearGridSlotBrush(std::size_t slotIndex,
+        SDK::UImage* image) noexcept
+    {
+        if (slotIndex >= gridSlots_.size()) return false;
+        if (!image || !image->Brush.ResourceObject) return true;
+#if defined(_DEBUG)
+        SDK::UObject* previousTarget = nullptr;
+        auto* materialObject = gridSlots_[slotIndex].materialInstance.Get();
+        if (materialObject && materialObject->IsA(SDK::UMaterialInstanceDynamic::StaticClass()))
+        {
+            auto* material = static_cast<SDK::UMaterialInstanceDynamic*>(materialObject);
+            const auto parameter = SDK::UKismetStringLibrary::Conv_StringToName(
+                SDK::FString(L"BuildingTarget"));
+            auto* effectiveTarget = material->K2_GetTextureParameterValue(parameter);
+            const auto& slot = gridSlots_[slotIndex];
+            if (effectiveTarget == slot.target.Get() || effectiveTarget == slot.candidateTarget.Get() ||
+                effectiveTarget == slot.retiredTarget.Get()) previousTarget = effectiveTarget;
+        }
+#endif
+        image->SetBrushFromMaterial(nullptr);
+        if (!image->Brush.ResourceObject)
+        {
+#if defined(_DEBUG)
+            if (previousTarget)
+                ReportGridSlotEvent(slotIndex, 0, previousTarget, "presentation-brush-detached");
+#endif
+            return true;
+        }
+#if defined(_DEBUG)
+        ReportGridSlotEvent(slotIndex, 10,
+            previousTarget ? previousTarget : image->Brush.ResourceObject,
+            previousTarget ? "previous-target-still-effectively-bound" :
+                "presentation-brush-withdrawal-failed");
+#endif
+        return false;
+    }
+
+    /** Releases a detached slot MID without discarding ownership after a rejected native release. */
+    bool BuildingMapPresentation::ReleaseGridSlotMaterial(std::size_t slotIndex) noexcept
+    {
+        if (slotIndex >= gridSlots_.size()) return false;
+        auto& materialInstance = gridSlots_[slotIndex].materialInstance;
+        if (materialInstance.Reset()) return true;
+#if defined(_DEBUG)
+        ReportGridSlotEvent(slotIndex, 6, materialInstance.Get(), "material-release-deferred");
+#endif
+        return false;
+    }
+
+    /** Publishes an eligible target after preserving the old lease until its MID no longer uses it. */
+    bool BuildingMapPresentation::PublishGridSlot(std::size_t slotIndex,
+        const BuildingMapTarget::CompositeTargetInfo& targetInfo,
+        const SDK::FVector2D& position, const SDK::FVector2D& size)
+    {
+        if (slotIndex >= gridSlots_.size() || !targetInfo.Target) return false;
+        GridPresentationSlot& slot = gridSlots_[slotIndex];
+        if (slot.retiredTarget && !slot.retiredTarget.Reset()) return false;
+        auto* retainedTarget = static_cast<SDK::UTextureRenderTarget2D*>(slot.target.Get());
+        auto* pendingTarget = static_cast<SDK::UTextureRenderTarget2D*>(slot.candidateTarget.Get());
+        const bool targetAssignmentChanged = retainedTarget == targetInfo.Target &&
+            slot.HasTargetIdentity && !MatchesGridTargetIdentity(slot, targetInfo.Assignment, false);
+#if defined(_DEBUG)
+        const bool recycledPhysicalTarget = targetAssignmentChanged ||
+            targetInfo.TargetWasReusedForAssignment;
+#endif
+        if (targetAssignmentChanged && slot.HasPublication) return false;
+        if (pendingTarget == targetInfo.Target && slot.HasCandidateIdentity &&
+            !MatchesGridTargetIdentity(slot, targetInfo.Assignment, true)) return false;
+        if (retainedTarget != targetInfo.Target && pendingTarget != targetInfo.Target)
+        {
+            if (slot.candidateTarget && !slot.candidateTarget.Reset()) return false;
+            slot.HasCandidateIdentity = false;
+            if (!slot.candidateTarget.Acquire(targetInfo.Target)) return false;
+            StoreGridTargetIdentity(slot, targetInfo.Assignment, true);
+        }
+        if (!ApplyGridGeometry(slotIndex, position, size) ||
+            !BindGridTarget(slotIndex, targetInfo.Target)) return false;
+        if (retainedTarget != targetInfo.Target)
+        {
+            if (slot.target) slot.retiredTarget = std::move(slot.target);
+            slot.target = std::move(slot.candidateTarget);
+            StoreGridTargetIdentity(slot, targetInfo.Assignment, false);
+            slot.HasCandidateIdentity = false;
+        }
+        else if (!slot.HasTargetIdentity || targetAssignmentChanged)
+        {
+            StoreGridTargetIdentity(slot, targetInfo.Assignment, false);
+        }
+        const bool visible = ShowGridImage(slotIndex);
+        if (!visible) return false;
+#if defined(_DEBUG)
+        StoreGridPublication(slotIndex, targetInfo, recycledPhysicalTarget);
+#else
+        StoreGridPublication(slotIndex, targetInfo);
+#endif
+        ReleaseRetiredGridTarget(slotIndex);
+        return true;
+    }
+
+    /** Releases every unbound target lease for a slot without losing rejected ownership records. */
+    bool BuildingMapPresentation::ReleaseGridSlotTargets(std::size_t slotIndex) noexcept
+    {
+        if (slotIndex >= gridSlots_.size()) return false;
+        GridPresentationSlot& slot = gridSlots_[slotIndex];
+        if (!slot.candidateTarget.Reset())
+        {
+#if defined(_DEBUG)
+            ReportGridSlotEvent(slotIndex, 5, slot.candidateTarget.Get(),
+                "candidate-target-release-deferred");
+#endif
+            return false;
+        }
+        slot.HasCandidateIdentity = false;
+        if (!slot.retiredTarget.Reset())
+        {
+#if defined(_DEBUG)
+            ReportGridSlotEvent(slotIndex, 8, slot.retiredTarget.Get(), "retired-target-release-deferred");
+#endif
+            return false;
+        }
+        if (!slot.target.Reset())
+        {
+#if defined(_DEBUG)
+            ReportGridSlotEvent(slotIndex, 11, slot.target.Get(), "target-lease-release-deferred");
+#endif
+            return false;
+        }
+        slot.HasTargetIdentity = false;
+#if defined(_DEBUG)
+        gridSlots_[slotIndex].HasLastFailure = false;
+#endif
+        return true;
+    }
+
+    /** Releases an old target lease once its MID has been rebound to a different target. */
+    bool BuildingMapPresentation::ReleaseRetiredGridTarget(std::size_t slotIndex) noexcept
+    {
+        if (slotIndex >= gridSlots_.size()) return false;
+        if (gridSlots_[slotIndex].retiredTarget.Reset()) return true;
+#if defined(_DEBUG)
+        BuildingMapGridPlanner::SlotAssignment assignment{};
+        assignment.PhysicalSlotIndex = static_cast<std::uint32_t>(slotIndex);
+        assignment.SessionEpoch = gridSlots_[slotIndex].SessionEpoch;
+        assignment.Tile = gridSlots_[slotIndex].Tile;
+        assignment.Bounds = gridSlots_[slotIndex].Bounds;
+        assignment.AssignmentGeneration = gridSlots_[slotIndex].AssignmentGeneration;
+        if (ShouldLogGridFailure(slotIndex, assignment, 8))
+            LogGridSlotEvent(slotIndex, assignment, gridSlots_[slotIndex].ContentGeneration,
+                gridSlots_[slotIndex].target.Get(), "retired-target-release-deferred");
+#endif
+        return false;
+    }
+
+    /** Detaches one slot and releases its resources only after every UI reference is cleared. */
+    bool BuildingMapPresentation::RetireGridSlot(std::size_t slotIndex,
+        bool widgetDestructionStarted) noexcept
+    {
+        if (slotIndex >= gridSlots_.size()) return false;
+        GridPresentationSlot& slot = gridSlots_[slotIndex];
+        if (!slot.WidgetDetached && widgetDestructionStarted && slot.image.Get())
+        {
+#if defined(_DEBUG)
+            ReportGridSlotEvent(slotIndex, 12, slot.image.Get(), "presentation-retirement-deferred");
+#endif
+            return false;
+        }
+        if (!WithdrawGridSlot(slotIndex)) return false;
+        if (!DetachGridSlotWidget(slotIndex)) return false;
+        if (slot.materialInstance && !slot.materialInstance.Reset())
+        {
+#if defined(_DEBUG)
+            ReportGridSlotEvent(slotIndex, 6, slot.materialInstance.Get(), "material-release-deferred");
+#endif
+            return false;
+        }
+        if (!ReleaseGridSlotTargets(slotIndex)) return false;
+        if (slot.image && !slot.image.Reset())
+        {
+#if defined(_DEBUG)
+            ReportGridSlotEvent(slotIndex, 13, slot.image.Get(), "image-lease-release-deferred");
+#endif
+            return false;
+        }
+        slot.WidgetDetached = false;
+        return true;
+    }
+
+    /** Removes one image and its brush reference before the slot MID and texture leases retire. */
+    bool BuildingMapPresentation::DetachGridSlotWidget(std::size_t slotIndex) noexcept
+    {
+        if (slotIndex >= gridSlots_.size()) return false;
+        GridPresentationSlot& slot = gridSlots_[slotIndex];
+        auto* imageObject = slot.image.Get();
+        if (imageObject && !imageObject->IsA(SDK::UImage::StaticClass()))
+        {
+#if defined(_DEBUG)
+            ReportGridSlotEvent(slotIndex, 12, imageObject, "presentation-image-validation-failed");
+#endif
+            return false;
+        }
+        if (!slot.WidgetDetached && imageObject && imageObject->IsA(SDK::UImage::StaticClass()))
+        {
+            auto* image = static_cast<SDK::UImage*>(imageObject);
+            image->RemoveFromParent();
+            if (image->GetParent() || image->Slot)
+            {
+#if defined(_DEBUG)
+                ReportGridSlotEvent(slotIndex, 12, image, "presentation-detach-failed");
+#endif
+                return false;
+            }
+            image->SetBrushFromMaterial(nullptr);
+            if (image->Brush.ResourceObject)
+            {
+#if defined(_DEBUG)
+                ReportGridSlotEvent(slotIndex, 12, image->Brush.ResourceObject,
+                    "presentation-brush-withdrawal-failed");
+#endif
+                return false;
+            }
+            slot.WidgetDetached = true;
+        }
+        return true;
+    }
+
+    /** Retires every presentation slot before the shared parent material can be released. */
+    bool BuildingMapPresentation::RetireGridSlots(bool widgetDestructionStarted) noexcept
+    {
+        bool retired = true;
+        for (std::size_t slotIndex = 0; slotIndex < gridSlots_.size(); ++slotIndex)
+        {
+            if (!RetireGridSlot(slotIndex, widgetDestructionStarted)) retired = false;
+        }
+        return retired;
+    }
+
+    /** Verifies assignment, world bounds, accepted commit state, and the target's allocation contract. */
+    bool BuildingMapPresentation::IsGridTargetEligible(
+        const MainMapBuildingLayer::ConsumerContext& context,
+        const BuildingMapTarget::CompositeTargetInfo& targetInfo,
+        bool sourceSnapshotCurrent) const noexcept
+    {
+        const auto& assignment = targetInfo.Assignment;
+        auto* target = targetInfo.Target;
+        if (!sourceSnapshotCurrent || !assignment.IsAssigned || assignment.PhysicalSlotIndex >= gridSlots_.size() ||
+            assignment.SessionEpoch != context.epoch || !assignment.HasCommittedContent || assignment.IsDirty ||
+            !targetInfo.TargetMatchesAssignment || !target ||
+            !target->IsA(SDK::UTextureRenderTarget2D::StaticClass())) return false;
+        return target->SizeX == 1024 && target->SizeY == 1024 &&
+            target->RenderTargetFormat == SDK::ETextureRenderTargetFormat::RTF_RGBA16f &&
+            target->bForceLinearGamma != 0 && target->bAutoGenerateMips == 0 &&
+            target->ClearColor.R == 0.0f && target->ClearColor.G == 0.0f &&
+            target->ClearColor.B == 0.0f && target->ClearColor.A == 1.0f &&
+            assignment.Bounds.MaxX > assignment.Bounds.MinX &&
+            assignment.Bounds.MaxY > assignment.Bounds.MinY;
+    }
+
+    /** Matches the published world key and CPU content identity to one current target record. */
+    bool BuildingMapPresentation::MatchesGridPublication(std::size_t slotIndex,
+        const BuildingMapTarget::CompositeTargetInfo& targetInfo) const noexcept
+    {
+        if (slotIndex >= gridSlots_.size()) return false;
+        const auto& slot = gridSlots_[slotIndex];
+        const auto& assignment = targetInfo.Assignment;
+        return slot.HasPublication && slot.SessionEpoch == assignment.SessionEpoch &&
+            slot.AssignmentGeneration == assignment.AssignmentGeneration &&
+            slot.ContentGeneration == assignment.CommittedContentGeneration &&
+            slot.Tile.GroupingN == assignment.Tile.GroupingN &&
+            slot.Tile.X == assignment.Tile.X && slot.Tile.Y == assignment.Tile.Y &&
+            slot.Bounds.MinX == assignment.Bounds.MinX && slot.Bounds.MinY == assignment.Bounds.MinY &&
+            slot.Bounds.MaxX == assignment.Bounds.MaxX && slot.Bounds.MaxY == assignment.Bounds.MaxY &&
+            slot.target.Get() == targetInfo.Target && slot.HasTargetIdentity &&
+            MatchesGridTargetIdentity(slot, assignment, false);
+    }
+
+    /** Compares the world/session identity associated with a retained target lease. */
+    bool BuildingMapPresentation::MatchesGridTargetIdentity(const GridPresentationSlot& slot,
+        const BuildingMapGridPlanner::SlotAssignment& assignment,
+        bool candidateTarget) const noexcept
+    {
+        const auto& tile = candidateTarget ? slot.CandidateTile : slot.TargetTile;
+        const auto& bounds = candidateTarget ? slot.CandidateBounds : slot.TargetBounds;
+        const std::uint64_t epoch = candidateTarget ? slot.CandidateSessionEpoch : slot.TargetSessionEpoch;
+        const std::uint64_t generation = candidateTarget
+            ? slot.CandidateAssignmentGeneration : slot.TargetAssignmentGeneration;
+        return epoch == assignment.SessionEpoch && generation == assignment.AssignmentGeneration &&
+            tile.GroupingN == assignment.Tile.GroupingN && tile.X == assignment.Tile.X &&
+            tile.Y == assignment.Tile.Y && bounds.MinX == assignment.Bounds.MinX &&
+            bounds.MinY == assignment.Bounds.MinY && bounds.MaxX == assignment.Bounds.MaxX &&
+            bounds.MaxY == assignment.Bounds.MaxY;
+    }
+
+    /** Records the separate assignment identity owned by a current or candidate target lease. */
+    void BuildingMapPresentation::StoreGridTargetIdentity(GridPresentationSlot& slot,
+        const BuildingMapGridPlanner::SlotAssignment& assignment, bool candidateTarget) noexcept
+    {
+        if (candidateTarget)
+        {
+            slot.CandidateTile = assignment.Tile;
+            slot.CandidateBounds = assignment.Bounds;
+            slot.CandidateSessionEpoch = assignment.SessionEpoch;
+            slot.CandidateAssignmentGeneration = assignment.AssignmentGeneration;
+            slot.HasCandidateIdentity = true;
+            return;
+        }
+        slot.TargetTile = assignment.Tile;
+        slot.TargetBounds = assignment.Bounds;
+        slot.TargetSessionEpoch = assignment.SessionEpoch;
+        slot.TargetAssignmentGeneration = assignment.AssignmentGeneration;
+        slot.HasTargetIdentity = true;
+    }
+
+    /** Sets HitTestInvisible on a slot image and confirms Slate accepted the visible state. */
+    bool BuildingMapPresentation::ShowGridImage(std::size_t slotIndex) noexcept
+    {
+        if (slotIndex >= gridSlots_.size()) return false;
+        auto* imageObject = gridSlots_[slotIndex].image.Get();
+        if (!imageObject || !imageObject->IsA(SDK::UImage::StaticClass())) return false;
+        auto* image = static_cast<SDK::UImage*>(imageObject);
+        if (image->GetVisibility() != SDK::ESlateVisibility::HitTestInvisible)
+            image->SetVisibility(SDK::ESlateVisibility::HitTestInvisible);
+        return image->GetVisibility() == SDK::ESlateVisibility::HitTestInvisible;
+    }
+
+    /** Stores the exact published assignment and content identity after the slot becomes visible. */
+    void BuildingMapPresentation::StoreGridPublication(std::size_t slotIndex,
+        const BuildingMapTarget::CompositeTargetInfo& targetInfo
+#if defined(_DEBUG)
+        , bool recycledPhysicalTarget
+#endif
+        ) noexcept
+    {
+        GridPresentationSlot& slot = gridSlots_[slotIndex];
+        const auto& assignment = targetInfo.Assignment;
+        slot.Tile = assignment.Tile;
+        slot.Bounds = assignment.Bounds;
+        slot.SessionEpoch = assignment.SessionEpoch;
+        slot.AssignmentGeneration = assignment.AssignmentGeneration;
+        slot.ContentGeneration = assignment.CommittedContentGeneration;
+        slot.HasPublication = true;
+#if defined(_DEBUG)
+        const char* event = recycledPhysicalTarget ? "recycled-target-published" :
+            (gridSessionRetired_ ? "republished-after-reopen" :
+                (firstGridCompositeLogged_ ? "grid-slot-published" : "first-visible-composite"));
+        LogGridSlotEvent(slotIndex, assignment, assignment.CommittedContentGeneration,
+            slot.target.Get(), event);
+        firstGridCompositeLogged_ = true;
+        gridSessionRetired_ = false;
+        gridSlots_[slotIndex].HasLastFailure = false;
+#endif
+    }
+
+#if defined(_DEBUG)
+    /** Logs a source-independent presentation failure only when its slot identity changes. */
+    void BuildingMapPresentation::ReportGridFailure(std::size_t slotIndex,
+        const BuildingMapGridPlanner::SlotAssignment& assignment,
+        const BuildingMapTarget::CompositeTargetInfo& targetInfo,
+        std::uint8_t failureKind, const char* event) noexcept
+    {
+        if (!ShouldLogGridFailure(slotIndex, assignment, failureKind)) return;
+        LogGridSlotEvent(slotIndex, assignment, assignment.CommittedContentGeneration,
+            targetInfo.Target, event);
+    }
+
+    /** Suppresses a repeated failure for the same physical assignment and failure category. */
+    bool BuildingMapPresentation::ShouldLogGridFailure(std::size_t slotIndex,
+        const BuildingMapGridPlanner::SlotAssignment& assignment,
+        std::uint8_t failureKind) noexcept
+    {
+        if (slotIndex >= gridSlots_.size()) return false;
+        auto& slot = gridSlots_[slotIndex];
+        if (slot.HasLastFailure &&
+            slot.LastFailureAssignmentGeneration == assignment.AssignmentGeneration &&
+            slot.LastFailureKind == failureKind) return false;
+        slot.LastFailureAssignmentGeneration = assignment.AssignmentGeneration;
+        slot.LastFailureKind = failureKind;
+        slot.HasLastFailure = true;
+        return true;
+    }
+
+    /** Logs a bounded slot transition with whichever publication or target identity remains retained. */
+    void BuildingMapPresentation::ReportGridSlotEvent(std::size_t slotIndex,
+        std::uint8_t failureKind, SDK::UObject* target, const char* event) noexcept
+    {
+        if (slotIndex >= gridSlots_.size()) return;
+        const GridPresentationSlot& slot = gridSlots_[slotIndex];
+        BuildingMapGridPlanner::SlotAssignment assignment{};
+        assignment.PhysicalSlotIndex = static_cast<std::uint32_t>(slotIndex);
+        if (slot.HasPublication)
+        {
+            assignment.IsAssigned = true;
+            assignment.Tile = slot.Tile;
+            assignment.Bounds = slot.Bounds;
+            assignment.SessionEpoch = slot.SessionEpoch;
+            assignment.AssignmentGeneration = slot.AssignmentGeneration;
+            assignment.CommittedContentGeneration = slot.ContentGeneration;
+        }
+        else if (slot.HasTargetIdentity)
+        {
+            assignment.IsAssigned = true;
+            assignment.Tile = slot.TargetTile;
+            assignment.Bounds = slot.TargetBounds;
+            assignment.SessionEpoch = slot.TargetSessionEpoch;
+            assignment.AssignmentGeneration = slot.TargetAssignmentGeneration;
+        }
+        else if (slot.HasCandidateIdentity)
+        {
+            assignment.IsAssigned = true;
+            assignment.Tile = slot.CandidateTile;
+            assignment.Bounds = slot.CandidateBounds;
+            assignment.SessionEpoch = slot.CandidateSessionEpoch;
+            assignment.AssignmentGeneration = slot.CandidateAssignmentGeneration;
+        }
+        if (failureKind != 0 && !ShouldLogGridFailure(slotIndex, assignment, failureKind)) return;
+        LogGridSlotEvent(slotIndex, assignment, assignment.CommittedContentGeneration, target, event);
+    }
+
+    /** Emits presentation identity and bounds for an existing slot event. */
+    void BuildingMapPresentation::LogGridSlotEvent(std::size_t slotIndex,
+        const BuildingMapGridPlanner::SlotAssignment& assignment,
+        std::uint64_t contentGeneration, SDK::UObject* target, const char* event) noexcept
+    {
+        LOG_INFO("MainMap grid presentation: event=%s epoch=%llu slot=%u N=%lld tile=%lld,%lld assignment=%llu content=%llu target=%p bounds-cm=%lld,%lld,%lld,%lld",
+            event ? event : "state", static_cast<unsigned long long>(assignment.SessionEpoch),
+            static_cast<unsigned int>(slotIndex), static_cast<long long>(assignment.Tile.GroupingN),
+            static_cast<long long>(assignment.Tile.X), static_cast<long long>(assignment.Tile.Y),
+            static_cast<unsigned long long>(assignment.AssignmentGeneration),
+            static_cast<unsigned long long>(contentGeneration), static_cast<void*>(target),
+            static_cast<long long>(assignment.Bounds.MinX),
+            static_cast<long long>(assignment.Bounds.MinY),
+            static_cast<long long>(assignment.Bounds.MaxX),
+            static_cast<long long>(assignment.Bounds.MaxY));
+    }
+
+#endif
 
     /** Loads the packaged UI material once after the existing embedded mount is accepted. */
     bool BuildingMapPresentation::EnsureMaterial(SDK::UObject* worldContext, bool materialResourcesReady)
@@ -183,23 +1099,25 @@ namespace MainMapBuildingMap
         const double localSize = targetInfo.SectionSizeMapUnits / 100.0;
         if (!std::isfinite(localX) || !std::isfinite(localY) || !std::isfinite(localSize) || localSize <= 0.0)
             return false;
-        return MapAbsoluteBoundsToCanvas(canvasGeometry, terrainGeometry, localX, localY, localSize, position, size);
+        return MapAbsoluteBoundsToCanvas(canvasGeometry, terrainGeometry, localX, localY,
+            localSize, localSize, position, size);
     }
 
-    /** Converts both Section corners between Slate geometries and rejects invalid float slot values. */
+    /** Converts both world-rectangle corners between Slate geometries and rejects invalid float slot values. */
     bool BuildingMapPresentation::MapAbsoluteBoundsToCanvas(const SDK::FGeometry& canvasGeometry,
-        const SDK::FGeometry& terrainGeometry, double localX, double localY, double localSize,
+        const SDK::FGeometry& terrainGeometry, double localX, double localY,
+        double localWidth, double localHeight,
         SDK::FVector2D& position, SDK::FVector2D& size) const
     {
         const double limit = (std::numeric_limits<float>::max)();
-        if (!std::isfinite(localX + localSize) || !std::isfinite(localY + localSize) ||
+        if (!std::isfinite(localX + localWidth) || !std::isfinite(localY + localHeight) ||
             std::abs(localX) > limit || std::abs(localY) > limit ||
-            std::abs(localX + localSize) > limit || std::abs(localY + localSize) > limit)
+            std::abs(localX + localWidth) > limit || std::abs(localY + localHeight) > limit)
             return false;
         const auto absoluteTopLeft = SDK::USlateBlueprintLibrary::LocalToAbsolute(terrainGeometry,
             {static_cast<float>(localX), static_cast<float>(localY)});
         const auto absoluteBottomRight = SDK::USlateBlueprintLibrary::LocalToAbsolute(terrainGeometry,
-            {static_cast<float>(localX + localSize), static_cast<float>(localY + localSize)});
+            {static_cast<float>(localX + localWidth), static_cast<float>(localY + localHeight)});
         const auto canvasTopLeft = SDK::USlateBlueprintLibrary::AbsoluteToLocal(canvasGeometry, absoluteTopLeft);
         const auto canvasBottomRight = SDK::USlateBlueprintLibrary::AbsoluteToLocal(canvasGeometry, absoluteBottomRight);
         const double width = static_cast<double>(canvasBottomRight.X) - canvasTopLeft.X;
@@ -545,11 +1463,29 @@ namespace MainMapBuildingMap
     /** Detaches widgets before releasing leases and retains retry state after any failed release. */
     bool BuildingMapPresentation::Retire(bool widgetDestructionStarted) noexcept
     {
+        const std::uint64_t retiringEpoch = epoch_;
         if (!MainMapNative::CanOperate() || !MainMapNative::IsGameThread())
         {
             LogRetirementFailure("native-admission-or-game-thread");
             return false;
         }
+        if (!RetireGridSlots(widgetDestructionStarted))
+        {
+            return false;
+        }
+        if (!RetireLegacySingleSection(widgetDestructionStarted)) return false;
+        ResetPresentationSession();
+#if defined(_DEBUG)
+        BuildingMapGridPlanner::SlotAssignment assignment{};
+        LogGridSlotEvent(gridSlots_.size(), assignment, 0, nullptr, "cleanup-complete");
+        gridSessionRetired_ = retiringEpoch != 0;
+#endif
+        return true;
+    }
+
+    /** Detaches and releases the inactive single-image resource set after grid UI withdrawal. */
+    bool BuildingMapPresentation::RetireLegacySingleSection(bool widgetDestructionStarted) noexcept
+    {
         if (!widgetDetached_ && widgetDestructionStarted)
         {
             LogRetirementFailure("widget-destruction-started-before-detachment");
@@ -582,7 +1518,12 @@ namespace MainMapBuildingMap
             widgetDetached_ = true;
             materialInstanceDetached_ = true;
         }
-        if (!ReleaseDetachedResources(true)) return false;
+        return ReleaseDetachedResources(true);
+    }
+
+    /** Clears cached session and geometry identities after all presentation leases are released. */
+    void BuildingMapPresentation::ResetPresentationSession() noexcept
+    {
         presentedInfo_ = {};
         epoch_ = 0;
         materialLoadAttempted_ = false;
@@ -592,6 +1533,8 @@ namespace MainMapBuildingMap
         widgetDetached_ = false;
         materialInstanceDetached_ = false;
         retirementFailureStage_ = nullptr;
-        return true;
+        hasGridGeometryInput_ = false;
+        lastGridCanvasIdentity_ = 0;
+        lastGridTreeIdentity_ = 0;
     }
 }
