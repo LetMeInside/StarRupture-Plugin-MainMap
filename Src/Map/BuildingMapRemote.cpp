@@ -60,7 +60,7 @@ namespace MainMapBuildingMap
 
     /** Creates the provider-owned collector and opens an ordinary viewport when absent. */
     bool BuildingMapRemote::EnsureViewport(double xMapUnits, double yMapUnits,
-        double widthMapUnits, double heightMapUnits)
+        double widthMapUnits, double heightMapUnits, bool& opened)
     {
         if (collector_ == 0)
         {
@@ -83,6 +83,7 @@ namespace MainMapBuildingMap
             widthMapUnits, heightMapUnits, &viewport_);
         if (result == BUILDING_MAP_ABI_OK && viewport_ != 0)
         {
+            opened = true;
             return true;
         }
 
@@ -95,7 +96,7 @@ namespace MainMapBuildingMap
 
     /** Confirms live provider/session state and prepares a current collector and viewport. */
     bool BuildingMapRemote::PrepareViewport(double xMapUnits, double yMapUnits,
-        double widthMapUnits, double heightMapUnits)
+        double widthMapUnits, double heightMapUnits, bool& opened)
     {
         BuildingMapABIState state{};
         const auto result = QueryProviderState(state);
@@ -127,13 +128,14 @@ namespace MainMapBuildingMap
             AbandonHandles();
             ClearImages();
         }
-        return EnsureViewport(xMapUnits, yMapUnits, widthMapUnits, heightMapUnits);
+        return EnsureViewport(xMapUnits, yMapUnits, widthMapUnits, heightMapUnits, opened);
     }
 
     /** Updates even an unchanged rectangle, validates ownership again, and polls current images. */
     bool BuildingMapRemote::AdvanceViewportAndPoll(double xMapUnits, double yMapUnits,
-        double widthMapUnits, double heightMapUnits)
+        double widthMapUnits, double heightMapUnits, bool& updateAccepted)
     {
+        updateAccepted = false;
         auto result = table_.UpdateViewport(viewport_, xMapUnits, yMapUnits,
             widthMapUnits, heightMapUnits);
         if (result != BUILDING_MAP_ABI_OK)
@@ -173,6 +175,7 @@ namespace MainMapBuildingMap
             return false;
         }
 
+        updateAccepted = true;
         availability_ = Availability::Active;
         try
         {
@@ -185,28 +188,43 @@ namespace MainMapBuildingMap
     }
 
     /** Advances the same rectangle every active tick, then polls the current visible grid. */
-    void BuildingMapRemote::UpdateViewport(double xMapUnits, double yMapUnits,
+    BuildingMapRemote::ViewportUpdateResult BuildingMapRemote::UpdateViewport(double xMapUnits, double yMapUnits,
         double widthMapUnits, double heightMapUnits)
     {
         pollState_ = PollState::Incomplete;
         if (!IsAdmittedGameThread())
         {
             availability_ = Availability::Failure;
-            return;
+            return ViewportUpdateResult::Rejected;
         }
         if (!tableAvailable_ && !DiscoverProvider())
         {
             ClearImages();
-            return;
+            return ViewportUpdateResult::NoViewport;
         }
-        if (!PrepareViewport(xMapUnits, yMapUnits, widthMapUnits, heightMapUnits))
+        bool opened = false;
+        if (!PrepareViewport(xMapUnits, yMapUnits, widthMapUnits, heightMapUnits, opened))
         {
-            return;
+            return viewport_ == 0
+                ? ViewportUpdateResult::NoViewport
+                : ViewportUpdateResult::Rejected;
         }
-        if (!AdvanceViewportAndPoll(xMapUnits, yMapUnits, widthMapUnits, heightMapUnits))
+        bool updateAccepted = false;
+        const bool pollCompleted=AdvanceViewportAndPoll(xMapUnits, yMapUnits,
+            widthMapUnits, heightMapUnits, updateAccepted);
+        if (!pollCompleted)
         {
             availability_ = Availability::Failure;
         }
+        if (viewport_ == 0)
+        {
+            return ViewportUpdateResult::NoViewport;
+        }
+        if (opened)
+        {
+            return ViewportUpdateResult::Opened;
+        }
+        return updateAccepted ? ViewportUpdateResult::Updated : ViewportUpdateResult::Rejected;
     }
 
     /** Copies one cell using its current metadata and retries once if its required size changes. */

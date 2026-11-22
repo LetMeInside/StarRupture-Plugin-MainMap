@@ -14,8 +14,11 @@
 #include "SlateCore_structs.hpp"
 #include "plugin_helpers.h"
 
+#include <Windows.h>
+
 #include <atomic>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <new>
 #include <limits>
@@ -26,23 +29,84 @@ static_assert(sizeof(SDK::FMargin)==0x10);
 
 namespace
 {
+    constexpr double kGeometryEpsilon=0.001;
+    // Ignore 0.001% sampling noise while allowing gradual scale changes to accumulate.
+    constexpr double kScaleChangeRelativeTolerance=1.0e-5;
+    constexpr std::chrono::milliseconds kZoomSettleDuration{250};
+
     struct Session final
     {
         MainMapNative::StrongObjectLease terrain,world,canvas;
         MainMapNative::StrongObjectLease owningMenu;
+        MainMapBuildingLayer::WorldRect providerWorld{};
+        std::chrono::steady_clock::time_point lastScaleChange{};
+        double observedViewportWidth=0.0;
+        double observedViewportHeight=0.0;
         uint64_t epoch=0;
         bool closing=false;
         bool terrainDestructionStarted=false;
+        bool providerWorldValid=false;
+        bool viewportScaleObserved=false;
+        bool zoomSettlementPending=false;
         uint64_t diagnosticTickBlocks=0;
         uint64_t diagnosticContextRejections=0;
         uint64_t diagnosticCleanupDeferrals=0;
         const char* closingReason=nullptr;
+
+        /** Tracks significant viewport scale changes and clears zoom deferral after 250 ms of stability. */
+        void ObserveViewportScale(double width, double height,
+            std::chrono::steady_clock::time_point sampledAt)
+        {
+            if (!viewportScaleObserved)
+            {
+                observedViewportWidth=width;
+                observedViewportHeight=height;
+                viewportScaleObserved=true;
+                return;
+            }
+
+            const double widthTolerance=(std::max)(std::abs(width),std::abs(observedViewportWidth)) *
+                kScaleChangeRelativeTolerance;
+            const double heightTolerance=(std::max)(std::abs(height),std::abs(observedViewportHeight)) *
+                kScaleChangeRelativeTolerance;
+            const bool widthChanged=std::abs(width-observedViewportWidth)>widthTolerance;
+            const bool heightChanged=std::abs(height-observedViewportHeight)>heightTolerance;
+            if (widthChanged || heightChanged)
+            {
+                observedViewportWidth=width;
+                observedViewportHeight=height;
+                lastScaleChange=sampledAt;
+                zoomSettlementPending=true;
+                return;
+            }
+
+            if (zoomSettlementPending && sampledAt-lastScaleChange>=kZoomSettleDuration)
+            {
+                zoomSettlementPending=false;
+            }
+        }
+
+        /** Clears provider and zoom state when the associated viewport lifetime ends. */
+        void ResetZoomObservationState()
+        {
+            lastScaleChange={};
+            observedViewportWidth=0.0;
+            observedViewportHeight=0.0;
+            viewportScaleObserved=false;
+            zoomSettlementPending=false;
+        }
+
+        /** Clears accepted provider bounds and zoom state when the viewport lifetime ends. */
+        void ResetProviderViewportState()
+        {
+            providerWorld={};
+            providerWorldValid=false;
+            ResetZoomObservationState();
+        }
     };
 
     struct Rect final { double minX=0,minY=0,maxX=0,maxY=0; };
     struct Point final { double x=0,y=0; };
-
-    constexpr double kGeometryEpsilon=0.001;
 
     bool FinitePoint(const Point& p) { return std::isfinite(p.x)&&std::isfinite(p.y); }
     bool Positive(const Rect& r)
@@ -233,6 +297,7 @@ namespace
             return false;
         }
         g_buildingMapRemote.CloseViewport();
+        session.ResetProviderViewportState();
         // Retire the Section composition before releasing terrain dependencies.
         // Preserve every terrain lease if any release is rejected.
         if (!session.owningMenu.Reset() || !session.canvas.Reset() ||
@@ -545,10 +610,32 @@ namespace MainMapBuildingLayer
             MainMapBuildingMap::BuildingMapTarget::InvalidateGridPlanInputShared();
             if (!MainMapBuildingMap::BuildingMapTarget::RetireShared()) return;
             g_buildingMapRemote.CloseViewport();
+            session.ResetProviderViewportState();
             return;
         }
-        g_buildingMapRemote.UpdateViewport(visibleWorld.minX, visibleWorld.minY,
-            visibleWorld.maxX - visibleWorld.minX, visibleWorld.maxY - visibleWorld.minY);
+        const double visibleWidth=visibleWorld.maxX-visibleWorld.minX;
+        const double visibleHeight=visibleWorld.maxY-visibleWorld.minY;
+        session.ObserveViewportScale(visibleWidth,visibleHeight,std::chrono::steady_clock::now());
+        const bool leftButtonHeld=(GetAsyncKeyState(VK_LBUTTON)&0x8000)!=0;
+        const bool providerMovementDeferred=leftButtonHeld||session.zoomSettlementPending;
+        const WorldRect requestedWorld=providerMovementDeferred&&session.providerWorldValid
+            ?session.providerWorld:visibleWorld;
+        const auto viewportUpdate=g_buildingMapRemote.UpdateViewport(requestedWorld.minX,requestedWorld.minY,
+            requestedWorld.maxX-requestedWorld.minX,requestedWorld.maxY-requestedWorld.minY);
+        if (viewportUpdate==MainMapBuildingMap::BuildingMapRemote::ViewportUpdateResult::Opened ||
+            viewportUpdate==MainMapBuildingMap::BuildingMapRemote::ViewportUpdateResult::Updated)
+        {
+            session.providerWorld=requestedWorld;
+            session.providerWorldValid=true;
+            if (viewportUpdate==MainMapBuildingMap::BuildingMapRemote::ViewportUpdateResult::Opened)
+            {
+                session.ResetZoomObservationState();
+            }
+        }
+        else if (viewportUpdate==MainMapBuildingMap::BuildingMapRemote::ViewportUpdateResult::NoViewport)
+        {
+            session.ResetProviderViewportState();
+        }
         MainMapBuildingLayer::ConsumerContext context{};
         SDK::UCanvasPanel* presentationCanvas=nullptr;
         SDK::UWidgetTree* presentationTree=nullptr;
@@ -558,10 +645,13 @@ namespace MainMapBuildingLayer
             MainMapBuildingMap::BuildingMapTarget::InvalidateGridPlanInputShared();
             if (!MainMapBuildingMap::BuildingMapTarget::RetireShared()) return;
             g_buildingMapRemote.CloseViewport();
+            session.ResetProviderViewportState();
             return;
         }
+        const WorldRect gridPlanningWorld=session.zoomSettlementPending && session.providerWorldValid
+            ?session.providerWorld:visibleWorld;
         const bool gridPlanCurrent = MainMapBuildingMap::BuildingMapTarget::UpdateGridPlanShared(
-            visibleWorld, session.epoch);
+            gridPlanningWorld, session.epoch);
         if (gridPlanCurrent)
         {
             MainMapBuildingMap::BuildingMapTarget::ReconcileGridSourcesShared(
@@ -629,6 +719,7 @@ namespace MainMapBuildingLayer
         if (presentationRetired && MainMapBuildingMap::BuildingMapTarget::RetireShared() && g_session)
             Cleanup();
         g_buildingMapRemote.Shutdown();
+        if (g_session) g_session->ResetProviderViewportState();
         const auto outstanding=MainMapNative::OutstandingLeaseCount();
         if (outstanding!=0)
             LOG_ERROR("MainMap A2.3B: shutdown cleanup incomplete; lease bookkeeping retained, no unsafe release attempted");

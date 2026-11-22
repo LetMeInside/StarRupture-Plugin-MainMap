@@ -52,6 +52,15 @@ namespace MainMapBuildingMap
             Failure
         };
 
+        /** Reports whether viewport bounds were accepted and whether this call opened its lifetime. */
+        enum class ViewportUpdateResult
+        {
+            NoViewport,
+            Rejected,
+            Opened,
+            Updated
+        };
+
         /** Global signed Section coordinate to consumer-owned completed RGBA8 image. */
         using ImageCollection = std::map<std::pair<int64_t, int64_t>, SectionImage>;
         /** Signed global Section coordinate observed as NO_IMAGE in the last complete poll. */
@@ -59,7 +68,8 @@ namespace MainMapBuildingMap
         using NoImageCollection = std::vector<SectionCoordinate>;
 
         /** Updates an active demand with unchanged map-unit rectangle values and polls its images. */
-        void UpdateViewport(double xMapUnits, double yMapUnits, double widthMapUnits, double heightMapUnits);
+        ViewportUpdateResult UpdateViewport(double xMapUnits, double yMapUnits,
+            double widthMapUnits, double heightMapUnits);
         /** Closes valid provider ownership when callable and clears all consumer image state. */
         void CloseViewport();
         /** Releases a viewport during the existing plugin shutdown path. */
@@ -83,12 +93,14 @@ namespace MainMapBuildingMap
         /** Queries service/session and both opaque handles into an initialized public ABI state. */
         BuildingMapABIResult QueryProviderState(BuildingMapABIState& state);
         /** Creates an opaque collector and opens its ordinary CPU-image viewport when needed. */
-        bool EnsureViewport(double xMapUnits, double yMapUnits, double widthMapUnits, double heightMapUnits);
+        bool EnsureViewport(double xMapUnits, double yMapUnits, double widthMapUnits, double heightMapUnits,
+            bool& opened);
         /** Checks provider/session/handle state and prepares valid ownership for this demand. */
-        bool PrepareViewport(double xMapUnits, double yMapUnits, double widthMapUnits, double heightMapUnits);
+        bool PrepareViewport(double xMapUnits, double yMapUnits, double widthMapUnits, double heightMapUnits,
+            bool& opened);
         /** Advances one provider update and polls the resulting current viewport grid. */
         bool AdvanceViewportAndPoll(double xMapUnits, double yMapUnits,
-            double widthMapUnits, double heightMapUnits);
+            double widthMapUnits, double heightMapUnits, bool& updateAccepted);
         /** Copies each visible cell and commits availability/NO_IMAGE state only after a full poll. */
         bool PollVisibleImages(uint64_t visibleWidth, uint64_t visibleHeight);
         /** Sorts and validates the current available/NO_IMAGE coordinate scratch sets. */
