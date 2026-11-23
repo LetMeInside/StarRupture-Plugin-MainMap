@@ -6,6 +6,8 @@
 #include "BuildingMapRemote.h"
 #include "BuildingMapTarget.h"
 #include "BuildingMapPresentation.h"
+#include "BuildingMapLayout.h"
+#include "Config/Config.h"
 #include "RenderingProof.h"
 #include "Native/NativeApi.h"
 #include "ChimeraUI_classes.hpp"
@@ -20,6 +22,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <memory>
 #include <new>
 #include <limits>
 
@@ -38,6 +41,7 @@ namespace
     {
         MainMapNative::StrongObjectLease terrain,world,canvas;
         MainMapNative::StrongObjectLease owningMenu;
+        std::unique_ptr<MainMapBuildingLayout::BuildingMapLayout> layout;
         MainMapBuildingLayer::WorldRect providerWorld{};
         std::chrono::steady_clock::time_point lastScaleChange{};
         double observedViewportWidth=0.0;
@@ -298,6 +302,13 @@ namespace
         }
         g_buildingMapRemote.CloseViewport();
         session.ResetProviderViewportState();
+        if (session.layout && !session.layout->RestoreAndRelease())
+        {
+            // Exceptional fallback: keep the unresolved layout owner and its
+            // remaining native leases alive without adding another retry manager.
+            session.layout.release();
+            LOG_WARN("MainMap: ExpandedMap restoration incomplete; unresolved UObject leases retained; session cleanup continues");
+        }
         // Retire the Section composition before releasing terrain dependencies.
         // Preserve every terrain lease if any release is rejected.
         if (!session.owningMenu.Reset() || !session.canvas.Reset() ||
@@ -549,6 +560,9 @@ namespace MainMapBuildingLayer
         }
         auto& session=*g_session;
         session.epoch=g_nextConsumerEpoch++;
+        session.layout.reset(new (std::nothrow) MainMapBuildingLayout::BuildingMapLayout);
+        if (!session.layout)
+            LOG_WARN("MainMap: ExpandedMap state allocation failed; native map and Building Map continue");
         LOG_INFO("MainMap diagnostics: terrain session created epoch=%llu world=%p terrain=%p",
             static_cast<unsigned long long>(session.epoch),world,terrain);
         if (!session.terrain.Acquire(terrain) || !session.world.Acquire(world) || !session.canvas.Acquire(canvas))
@@ -603,6 +617,25 @@ namespace MainMapBuildingLayer
             Close("session terrain/canvas changed");
             return;
         }
+        MainMapBuildingLayer::ConsumerContext context{};
+        SDK::UCanvasPanel* presentationCanvas=nullptr;
+        SDK::UWidgetTree* presentationTree=nullptr;
+        if (!TryGetConsumerContext(context) || !TryGetTilePresentationContext(presentationCanvas,presentationTree))
+        {
+            if (!MainMapBuildingMap::BuildingMapPresentation::RetireShared()) return;
+            MainMapBuildingMap::BuildingMapTarget::InvalidateGridPlanInputShared();
+            if (!MainMapBuildingMap::BuildingMapTarget::RetireShared()) return;
+            g_buildingMapRemote.CloseViewport();
+            session.ResetProviderViewportState();
+            return;
+        }
+        auto* menu=static_cast<SDK::UCrUW_MapMenu*>(session.owningMenu.Get());
+        if (session.layout)
+        {
+            const auto layoutResult=session.layout->Update(menu, Config::Get().ExpandedMap);
+            if (layoutResult==MainMapBuildingLayout::BuildingMapLayout::UpdateResult::WaitingForSlate)
+                return;
+        }
         MainMapBuildingLayer::WorldRect visibleWorld{};
         if (!TryGetVisibleWorldRect(visibleWorld))
         {
@@ -635,18 +668,6 @@ namespace MainMapBuildingLayer
         else if (viewportUpdate==MainMapBuildingMap::BuildingMapRemote::ViewportUpdateResult::NoViewport)
         {
             session.ResetProviderViewportState();
-        }
-        MainMapBuildingLayer::ConsumerContext context{};
-        SDK::UCanvasPanel* presentationCanvas=nullptr;
-        SDK::UWidgetTree* presentationTree=nullptr;
-        if (!TryGetConsumerContext(context) || !TryGetTilePresentationContext(presentationCanvas,presentationTree))
-        {
-            if (!MainMapBuildingMap::BuildingMapPresentation::RetireShared()) return;
-            MainMapBuildingMap::BuildingMapTarget::InvalidateGridPlanInputShared();
-            if (!MainMapBuildingMap::BuildingMapTarget::RetireShared()) return;
-            g_buildingMapRemote.CloseViewport();
-            session.ResetProviderViewportState();
-            return;
         }
         const WorldRect gridPlanningWorld=session.zoomSettlementPending && session.providerWorldValid
             ?session.providerWorld:visibleWorld;
