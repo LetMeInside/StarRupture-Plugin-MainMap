@@ -1,6 +1,7 @@
 ﻿#include "plugin.h"
 #include "plugin_helpers.h"
 #include "Config/Config.h"
+#include "resource.h"
 #ifdef MODLOADER_CLIENT_BUILD
 #include "Native/Fingerprints.h"
 #include "Native/NativeApi.h"
@@ -20,7 +21,7 @@ namespace
     void OnEngineShutdown()
     {
         g_engineShutdownSeen = true;
-        MainMapRenderingProof::Shutdown();
+        MainMapRenderingProof::Shutdown(true);
         MainMapNative::BeginShutdown(true);
         if (!MainMapNative::Shutdown())
             LOG_ERROR("MainMap: UObject leases remained at engine shutdown");
@@ -38,10 +39,6 @@ namespace
 }
 #endif
 
-#ifndef MODLOADER_BUILD_TAG
-#define MODLOADER_BUILD_TAG "0.1.0"
-#endif
-
 #ifdef MODLOADER_SERVER_BUILD
 #define MAINMAP_EXPORTS_TARGET PLUGIN_TARGET_SERVER
 #else
@@ -50,11 +47,13 @@ namespace
 
 static PluginInfo s_pluginInfo = {
     "MainMap",
-    MODLOADER_BUILD_TAG,
+    MAINMAP_VERSION_STRING,
     "Kian369",
-    "TODO: Add plugin description",
+    "Adds MiniMap building imagery to the in-game world map.",
     PLUGIN_INTERFACE_VERSION,
-    MAINMAP_EXPORTS_TARGET
+    MAINMAP_EXPORTS_TARGET,
+    PLUGIN_GAME_BUILT_CL,
+    PluginLoadSetting(PluginReload::RESTART) | PluginUnloadSetting(PluginReload::RESTART)
 };
 
 extern "C" __declspec(dllexport)
@@ -64,7 +63,7 @@ void OnPluginLoadHooks(IPluginSelf* self, IPluginHookScanner* scanner)
     g_nativeAddresses = {};
     if (!MainMapFingerprints::Resolve(self, scanner, g_nativeAddresses))
     {
-        LOG_ERROR("MainMap: mandatory native lifetime fingerprint resolution failed");
+            LOG_ERROR("MainMap: mandatory native lifecycle fingerprint resolution failed");
         return;
     }
 #else
@@ -113,18 +112,8 @@ extern "C"
         g_shutdownCallbackRegistered = true;
 #endif
 
-        if (!MainMapConfig::Initialize(g_self))
-        {
 #ifdef MODLOADER_CLIENT_BUILD
-            UnregisterEngineShutdownCallback();
-            MainMapNative::Shutdown();
-#endif
-            g_self = nullptr;
-            return false;
-        }
-
-#ifdef MODLOADER_CLIENT_BUILD
-        if (MainMapConfig::IsEnabled() && !MainMapRenderingProof::Initialize())
+        if (!MainMapRenderingProof::Initialize())
         {
             UnregisterEngineShutdownCallback();
             MainMapNative::Shutdown();
@@ -132,14 +121,14 @@ extern "C"
             return false;
         }
 #endif
-        LOG_INFO("MainMap: initialization complete");
+        Config::Initialize();
         return true;
     }
 
     __declspec(dllexport)
     void PluginShutdown()
     {
-        LOG_INFO("MainMap: shutting down");
+        Config::Shutdown();
 #ifdef MODLOADER_CLIENT_BUILD
         MainMapRenderingProof::Shutdown();
         UnregisterEngineShutdownCallback();

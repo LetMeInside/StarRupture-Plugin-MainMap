@@ -1,11 +1,14 @@
 """Explicit WindowsClient candidate cook/package, adapted from the verified A2.2 recipe.
-Consumes retained saved assets; never authors graphs or replaces accepted resources.
+Consumes baseline-pinned material assets and produces a review candidate; never
+authors graphs or replaces accepted resources.
 """
 import json
 import hashlib
 import os
+import stat
 import subprocess
 import struct
+import uuid
 from pathlib import Path
 
 import argparse
@@ -14,23 +17,150 @@ import shutil
 parser = argparse.ArgumentParser(description='Cook retained materials into a NEW candidate directory; never accepts outputs.')
 parser.add_argument('--candidate-directory', required=True, type=Path)
 parser.add_argument('--engine-root', type=Path, default=Path(r'C:\Program Files\Epic Games\UE_5.6'))
+parser.add_argument('--seed-ddc-from', type=Path,
+                    help='Copy an existing Research DDC into the persistent cache on first use; never overwrites an existing cache')
 args = parser.parse_args()
 SOURCE = Path(__file__).resolve().parents[1]
+RESEARCH = SOURCE.parents[2] / 'Research'
+PERSISTENT_DDC = RESEARCH / 'MainMap-MaterialCook-DDC'
 BASELINE = json.loads((SOURCE / 'Cook/material-baseline.json').read_text(encoding='utf-8'))
 CANDIDATE = args.candidate_directory.resolve()
 ENGINE = args.engine_root.resolve() / 'Engine'
 EDITOR = ENGINE / 'Binaries/Win64/UnrealEditor-Cmd.exe'
+if os.name != 'nt':
+    raise SystemExit('Candidate DDC junctions require Windows; no cook was started')
 for tool in (EDITOR, ENGINE / 'Binaries/Win64/UnrealPak.exe'):
     if not tool.is_file(): raise SystemExit(f'Required installed UE tool missing: {tool}')
 actual_build = json.loads((ENGINE / 'Build/Build.version').read_text())
 if actual_build != BASELINE['engine_build']:
     raise SystemExit('Installed engine Build.version differs from accepted UE 5.6.1 CL 44394996 baseline')
-if CANDIDATE.exists(): raise SystemExit(f'Refusing existing candidate directory: {CANDIDATE}')
+if os.path.lexists(CANDIDATE): raise SystemExit(f'Refusing existing candidate directory: {CANDIDATE}')
 if SOURCE.parent.parent == CANDIDATE or SOURCE.parent.parent in CANDIDATE.parents:
     raise SystemExit('Candidate outputs must be outside Solution; keep generated files out of repository source')
 # Refuse paths inside the installed toolchain as well.
 if ENGINE.parent == CANDIDATE or ENGINE.parent in CANDIDATE.parents:
     raise SystemExit('Candidate directory cannot be inside the installed engine')
+if not RESEARCH.is_dir() or PERSISTENT_DDC.parent.resolve() != RESEARCH.resolve():
+    raise SystemExit(f'Persistent DDC must be a direct child of MainMap Research: {PERSISTENT_DDC}')
+
+def is_within(path, parent):
+    path = os.path.normcase(os.path.abspath(path))
+    parent = os.path.normcase(os.path.abspath(parent))
+    try:
+        return os.path.commonpath((path, parent)) == parent
+    except ValueError:
+        return False
+
+def is_reparse_point(path):
+    try:
+        attributes = os.lstat(path).st_file_attributes
+    except (AttributeError, OSError):
+        return False
+    return bool(attributes & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0x400))
+
+def is_junction(path):
+    if not os.path.lexists(path):
+        return False
+    checker = getattr(os.path, 'isjunction', None)
+    if checker is not None:
+        return checker(path)
+    try:
+        return getattr(os.lstat(path), 'st_reparse_tag', None) == 0xA0000003
+    except OSError:
+        return False
+
+if is_within(PERSISTENT_DDC, CANDIDATE) or is_within(CANDIDATE, PERSISTENT_DDC):
+    raise SystemExit('Candidate and persistent DDC paths must be separate; the DDC cannot live in a disposable candidate')
+if is_within(PERSISTENT_DDC, SOURCE.parent.parent) or is_within(PERSISTENT_DDC, ENGINE.parent):
+    raise SystemExit(f'Persistent DDC cannot be inside Solution or the Unreal installation: {PERSISTENT_DDC}')
+
+def validate_seed_tree(source):
+    if not source.is_dir() or is_reparse_point(source):
+        raise SystemExit(f'DDC seed must be an existing, non-junction directory: {source}')
+    if not is_within(source, RESEARCH):
+        raise SystemExit(f'DDC seed must be under MainMap Research: {source}')
+    if is_within(PERSISTENT_DDC, source) or is_within(source, PERSISTENT_DDC):
+        raise SystemExit(f'DDC seed overlaps the persistent cache path: {source}')
+    if not (source / 'Buckets').is_dir():
+        raise SystemExit(f'DDC seed does not contain the expected filesystem cache Buckets directory: {source}')
+    found_file = False
+    for current, directories, files in os.walk(source, topdown=True, followlinks=False):
+        for name in directories + files:
+            item = Path(current) / name
+            if is_reparse_point(item):
+                raise SystemExit(f'DDC seed contains a reparse point; refusing to follow it: {item}')
+        if files:
+            found_file = True
+    if not found_file:
+        raise SystemExit(f'DDC seed is empty: {source}')
+
+def prepare_persistent_ddc(candidate_project):
+    target = PERSISTENT_DDC
+    link = candidate_project / 'DerivedDataCache'
+    if os.path.lexists(link):
+        raise SystemExit(f'Refusing existing candidate DDC path instead of replacing it: {link}')
+    if os.path.lexists(target):
+        if not target.is_dir() or is_reparse_point(target):
+            raise SystemExit(f'Persistent DDC path exists but is not a plain directory; refusing it: {target}')
+        if args.seed_ddc_from is not None:
+            raise SystemExit(f'Persistent DDC already exists; refusing to seed or overwrite it: {target}')
+    elif args.seed_ddc_from is not None:
+        seed_input = args.seed_ddc_from.absolute()
+        if os.path.lexists(seed_input) and is_reparse_point(seed_input):
+            raise SystemExit(f'DDC seed path must not itself be a junction or symlink: {seed_input}')
+        try:
+            seed = seed_input.resolve(strict=True)
+        except OSError as exc:
+            raise SystemExit(f'DDC seed path cannot be resolved: {seed_input}: {exc}')
+        validate_seed_tree(seed)
+        staged = RESEARCH / f'.MainMap-MaterialCook-DDC-seed-{uuid.uuid4().hex}'
+        if os.path.lexists(staged):
+            raise SystemExit(f'Refusing existing DDC seed staging path: {staged}')
+        try:
+            shutil.copytree(seed, staged, copy_function=shutil.copy2)
+            os.rename(staged, target)  # Same-volume, create-only publish; never replaces a cache.
+        except Exception as exc:
+            raise SystemExit(f'DDC seed copy/publish failed; any partial seed is preserved at {staged}: {exc}')
+    else:
+        try:
+            target.mkdir(parents=False, exist_ok=False)
+        except FileExistsError:
+            if not target.is_dir() or is_reparse_point(target):
+                raise SystemExit(f'Conflicting persistent DDC path appeared; refusing it: {target}')
+
+    if not target.is_dir() or is_reparse_point(target):
+        raise SystemExit(f'Persistent DDC is not a plain directory: {target}')
+    comspec = Path(os.environ.get('COMSPEC', r'C:\Windows\System32\cmd.exe'))
+    if not comspec.is_file():
+        raise SystemExit(f'Cannot create DDC junction: cmd.exe not found at {comspec}')
+    command_paths = (str(link), str(target))
+    if any(any(char in value for char in ('"', '%', '&', '|', '<', '>', '^', '!', '\r', '\n'))
+           for value in command_paths):
+        raise SystemExit('DDC junction path contains a cmd.exe metacharacter; refusing unsafe serialization')
+    junction_command = f'mklink /J "{link}" "{target}"'
+    try:
+        result = subprocess.run([str(comspec), '/d', '/c', junction_command], cwd=candidate_project,
+                                capture_output=True, text=True, errors='replace')
+    except OSError as exc:
+        raise SystemExit(f'DDC junction creation could not start; candidate DDC was not redirected: {exc}')
+    if result.returncode != 0:
+        raise SystemExit(f'DDC junction creation failed ({result.returncode}); candidate DDC was not redirected. '
+                         f'cmd output: {result.stdout.strip()} {result.stderr.strip()}')
+    if not is_junction(link):
+        raise SystemExit(f'mklink returned success but did not create a verifiable directory junction: {link}')
+    try:
+        resolved = link.resolve(strict=True)
+        if not os.path.samefile(link, target) or os.path.normcase(str(resolved)) != os.path.normcase(str(target.resolve(strict=True))):
+            raise SystemExit(f'DDC junction resolves somewhere other than the persistent cache: {link} -> {resolved}')
+    except OSError as exc:
+        raise SystemExit(f'DDC junction target verification failed: {link}: {exc}')
+    record = {'candidate_ddc_path':str(link), 'persistent_ddc_path':str(target),
+              'resolved_ddc_path':str(resolved), 'junction_verified':True,
+              'seeded_from':str(args.seed_ddc_from.resolve()) if args.seed_ddc_from else None}
+    (LOGS / 'ddc-location.json').write_text(json.dumps(record, indent=2))
+    print(f'DDC junction verified: {link} -> {resolved}', flush=True)
+    return resolved
+
 CANDIDATE.mkdir(parents=True)
 ROOT = CANDIDATE / 'Project'
 ROOT.mkdir()
@@ -47,6 +177,7 @@ LOGS.mkdir(parents=True, exist_ok=True)
 env = os.environ.copy()
 env['TEMP'] = env['TMP'] = str(ROOT / 'Saved/Temp')
 Path(env['TEMP']).mkdir(parents=True, exist_ok=True)
+RESOLVED_DDC = prepare_persistent_ddc(ROOT)
 
 def run(args, label):
     # Preserve attempts; never silently replace previous logs.
@@ -84,7 +215,8 @@ def package():
     work = CANDIDATE / 'Packaging'
     work.mkdir(exist_ok=True)
     packages = ['Mods/MiniMap/Materials/M_BuildingCompose', 'Mods/MainMap/Materials/M_BuildingPresent',
-                'Mods/MiniMap/Materials/T_ComposeDefault', 'Mods/MainMap/Materials/T_PresentDefault']
+                'Mods/MiniMap/Materials/T_ComposeDefault', 'Mods/MainMap/Materials/T_PresentDefault',
+                'Mods/MainMap/Materials/M_BuildingComplexPresent']
     entries, inventory, summaries = [], [], []
     for package in packages:
         stem = cooked / 'StarRupture/Content' / package
@@ -169,20 +301,22 @@ def compare():
         chunks = [{k.strip():v.strip() for k,v in row.items()} for row in csv.DictReader(f)]
     names = sorted(row['Filename'] for row in chunks if row['ChunkType'] == 'ExportBundleData')
     wanted = sorted(row['Filename'] for row in BASELINE['chunks'] if row['ChunkType'] == 'ExportBundleData')
-    if names != wanted or len(chunks) != 5:
-        raise RuntimeError('Candidate container inventory does not contain exactly the four accepted packages and header')
+    headers = [row for row in chunks if row['ChunkType'] == 'ContainerHeader']
+    if (names != wanted or len(headers) != 1 or len(chunks) != len(BASELINE['chunks'])):
+        raise RuntimeError('Candidate container inventory does not contain the five accepted packages and one header')
     chunk_differences = []
     expected_chunks = {row['Filename']:row for row in BASELINE['chunks']}
     for row in chunks:
+        if row['ChunkType'] == 'ContainerHeader':
+            continue  # Header identity and bytes are regenerated for each candidate container.
         before = expected_chunks[row['Filename']]
-        # Container header changes with the new container name/ID; package data must be inspected separately.
         if any(row[k] != before[k] for k in ('Hash','Size','PackageId')):
             chunk_differences.append(dict(file=row['Filename'],baseline=before,candidate=row))
     result = dict(cook_completed=True, packaging_completed=True,
-                  authored_inputs_identical=stage['authored_inputs'] == BASELINE['authored_inputs'],
+                  accepted_authored_inputs_identical=stage['authored_inputs'] == BASELINE['authored_inputs'],
                   shader_formats=stage['shader_formats'],shared_material_shader_code=stage['shared_material_shader_code'],
                   cooked_file_differences=differences,chunk_differences=chunk_differences,
-                  package_summaries_identical=stage['cooked_package_summaries'] == BASELINE['cooked_package_summaries'],
+                  accepted_package_summaries_identical=stage['cooked_package_summaries'] == BASELINE['cooked_package_summaries'],
                   accepted_resources_modified=False)
     (CANDIDATE / 'comparison.json').write_text(json.dumps(result,indent=2))
     print(f'VALID CANDIDATE: {CANDIDATE}; not accepted or installed. Cooked differences: {len(differences)}; chunk differences: {len(chunk_differences)}',flush=True)

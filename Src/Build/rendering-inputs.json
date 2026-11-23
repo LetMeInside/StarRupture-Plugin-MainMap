@@ -4,20 +4,20 @@
     {
       "id": 30101,
       "file": "Resources/Materials/MainMapMaterials.pak",
-      "bytes": 7202,
-      "sha256": "4d0144c38abfc62750b6e3f59af28d4b4046e297b7fef18b60f42d0d5a069083"
+      "bytes": 9211,
+      "sha256": "9a478cf32c831de10816aca6757bb97e8122320bed92cb114805ede7c48d00b0"
     },
     {
       "id": 30102,
       "file": "Resources/Materials/MainMapMaterials.utoc",
-      "bytes": 801,
-      "sha256": "409e371964dc58c5fb48fe4b98daa7e85a997230817844c7e6fb8235b52d3c8b"
+      "bytes": 919,
+      "sha256": "a18238fa366c31d0e84262b949fd37f752c6a269ae31b29ed1422691de6230a7"
     },
     {
       "id": 30103,
       "file": "Resources/Materials/MainMapMaterials.ucas",
-      "bytes": 303936,
-      "sha256": "a10e083edd0ea4a422c35f9d8eb96df98d2a051d21777386c8ca147ec8eaf024"
+      "bytes": 435040,
+      "sha256": "ca1fd19a24c04298fa397cfa89087cce465619370dcc95df62bc163ade5f1dfc"
     }
   ]
 }

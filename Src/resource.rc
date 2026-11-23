@@ -5,9 +5,7 @@
 IDR_MAINMAP_MATERIALS_PAK RCDATA "Resources\\Materials\\MainMapMaterials.pak"
 IDR_MAINMAP_MATERIALS_UTOC RCDATA "Resources\\Materials\\MainMapMaterials.utoc"
 IDR_MAINMAP_MATERIALS_UCAS RCDATA "Resources\\Materials\\MainMapMaterials.ucas"
-#define STRINGIZE2(x) #x
-#define STRINGIZE(x) STRINGIZE2(x)
-#define VERSION_STRING STRINGIZE(VERSION_MAJOR) "." STRINGIZE(VERSION_MINOR) "." STRINGIZE(VERSION_PATCH) ".0"
+#define VERSION_STRING MAINMAP_VERSION_STRING ".0"
 
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION VERSION_MAJOR,VERSION_MINOR,VERSION_PATCH,0
@@ -23,7 +21,7 @@ BEGIN
         BLOCK "040904B0"
         BEGIN
             VALUE "CompanyName", "Kian369 / LetMeInside\0"
-            VALUE "FileDescription", "TODO: Add plugin description\0"
+            VALUE "FileDescription", "Adds MiniMap building imagery to the in-game world map.\0"
             VALUE "FileVersion", VERSION_STRING "\0"
             VALUE "InternalName", "MainMap.dll\0"
             VALUE "OriginalFilename", "MainMap.dll\0"

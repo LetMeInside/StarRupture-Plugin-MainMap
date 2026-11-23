@@ -65,7 +65,7 @@
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(StarRupturePluginSDKRoot)include;$(StarRuptureSDKConfigDir);$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(StarRupturePluginSDKRoot)include;$(StarRuptureSDKConfigDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -83,7 +83,7 @@
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(StarRupturePluginSDKRoot)include;$(StarRuptureSDKConfigDir);$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(StarRupturePluginSDKRoot)include;$(StarRuptureSDKConfigDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -95,20 +95,19 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="Config\Config.h" />
+    <ClInclude Include="Map\BuildingLayer.h" />
+    <ClInclude Include="Map\BuildingMapLayout.h" />
+    <ClInclude Include="Map\BuildingMapRemote.h" />
+    <ClInclude Include="Map\BuildingMapGridPlanner.h" />
+    <ClInclude Include="Map\BuildingMapTarget.h" />
+    <ClInclude Include="Map\BuildingMapPresentation.h" />
+    <ClInclude Include="Map\MaterialProof.h" />
+    <ClInclude Include="Map\RenderingProof.h" />
     <ClInclude Include="Native\Fingerprints.h" />
     <ClInclude Include="Native\NativeApi.h" />
     <ClInclude Include="plugin.h" />
     <ClInclude Include="plugin_helpers.h" />
     <ClInclude Include="resource.h" />
-  </ItemGroup>
-  <ItemGroup Condition="'$(Configuration)' == 'Client Debug' Or '$(Configuration)' == 'Client Release'">
-    <ClInclude Include="Map\RenderingProof.h" />
-    <ClInclude Include="Map\BuildingTarget.h" />
-    <ClInclude Include="Map\MaterialProof.h" />
-    <ClInclude Include="Map\ProofReflection.h" />
-    <ClInclude Include="Map\RenderingProofPixels.h" />
-    <ClInclude Include="Native\Fingerprints.h" />
-    <ClInclude Include="Native\NativeApi.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="$(StarRuptureSDKSourceDir)Basic.cpp">
@@ -121,16 +120,48 @@
       <Visible>false</Visible>
     </ClCompile>
     <ClCompile Include="dllmain.cpp" />
+    <ClCompile Include="Map\BuildingLayer.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)' != 'Client Debug' And '$(Configuration)' != 'Client Release'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="Map\BuildingMapLayout.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)' != 'Client Debug' And '$(Configuration)' != 'Client Release'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="Map\BuildingMapRemote.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)' != 'Client Debug' And '$(Configuration)' != 'Client Release'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="Map\BuildingMapGridPlanner.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)' != 'Client Debug' And '$(Configuration)' != 'Client Release'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="Map\BuildingMapTarget.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)' != 'Client Debug' And '$(Configuration)' != 'Client Release'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="Map\BuildingMapPresentation.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)' != 'Client Debug' And '$(Configuration)' != 'Client Release'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="$(StarRuptureSDKSourceDir)CommonUI_functions.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)' != 'Client Debug' And '$(Configuration)' != 'Client Release'">true</ExcludedFromBuild>
+      <Visible>false</Visible>
+    </ClCompile>
+    <ClCompile Include="$(StarRuptureSDKSourceDir)UMG_functions.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)' != 'Client Debug' And '$(Configuration)' != 'Client Release'">true</ExcludedFromBuild>
+      <Visible>false</Visible>
+    </ClCompile>
     <ClCompile Include="Config\Config.cpp" />
+    <ClCompile Include="Map\MaterialProof.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)' != 'Client Debug' And '$(Configuration)' != 'Client Release'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="Map\RenderingProof.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)' != 'Client Debug' And '$(Configuration)' != 'Client Release'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="Native\Fingerprints.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)' != 'Client Debug' And '$(Configuration)' != 'Client Release'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="Native\NativeApi.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)' != 'Client Debug' And '$(Configuration)' != 'Client Release'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="plugin.cpp" />
   </ItemGroup>
-  <ItemGroup Condition="'$(Configuration)' == 'Client Debug' Or '$(Configuration)' == 'Client Release'">
-    <ClCompile Include="Map\RenderingProof.cpp" />
-    <ClCompile Include="Map\BuildingTarget.cpp" />
-    <ClCompile Include="Map\MaterialProof.cpp" />
-    <ClCompile Include="Native\Fingerprints.cpp" />
-    <ClCompile Include="Native\NativeApi.cpp" />
-  </ItemGroup>
+  <ItemGroup Condition="'$(Configuration)' == 'Client Debug' Or '$(Configuration)' == 'Client Release'"></ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="resource.rc">
       <AdditionalIncludeDirectories>$(ProjectDir);$(IntDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>

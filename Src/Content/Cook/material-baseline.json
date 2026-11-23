@@ -54,6 +54,18 @@
       "bytes": 447,
       "sha256": "3e87d23bedf84f58f0b44665a393f3598f04e2d0d84e4a3ca41b083a92c22b96",
       "file": "StarRupture/Content/Mods/MainMap/Materials/T_PresentDefault.uexp"
+    },
+    {
+      "mount_path": "../../../StarRupture/Content/Mods/MainMap/Materials/M_BuildingComplexPresent.uasset",
+      "bytes": 3131,
+      "sha256": "8ffe6d3fbadb9ec71d134b85a5233d4e5afa711965a875483a20f5567e02e872",
+      "file": "StarRupture/Content/Mods/MainMap/Materials/M_BuildingComplexPresent.uasset"
+    },
+    {
+      "mount_path": "../../../StarRupture/Content/Mods/MainMap/Materials/M_BuildingComplexPresent.uexp",
+      "bytes": 105794,
+      "sha256": "eb6b2e7b5c85dc5c1274b4db41091d338eb0eb6082aae69b5a6d3061b0bdbc30",
+      "file": "StarRupture/Content/Mods/MainMap/Materials/M_BuildingComplexPresent.uexp"
     }
   ],
   "cooked_package_summaries": [
@@ -92,6 +104,15 @@
       "file_version_ue5": 1017,
       "licensee_version": 0,
       "package": "/Game/Mods/MainMap/Materials/T_PresentDefault"
+    },
+    {
+      "tag": 2653586369,
+      "legacy_file_version": -9,
+      "legacy_ue3_version": 864,
+      "file_version_ue4": 522,
+      "file_version_ue5": 1017,
+      "licensee_version": 0,
+      "package": "/Game/Mods/MainMap/Materials/M_BuildingComplexPresent"
     }
   ],
   "authored_inputs": [
@@ -109,6 +130,11 @@
       "file": "Config/DefaultGame.ini",
       "bytes": 466,
       "sha256": "2ba69d70cfaf291c3b6813720029c3dff61cc8b846d24b8fb39cbcb17a73d7db"
+    },
+    {
+      "file": "Content/Mods/MainMap/Materials/M_BuildingComplexPresent.uasset",
+      "bytes": 10620,
+      "sha256": "df930062c038fdb6f8c3cf240648513007ddd0e902221cfe2465b1fbddab68d8"
     },
     {
       "file": "Content/Mods/MainMap/Materials/M_BuildingPresent.uasset",
@@ -145,23 +171,23 @@
     {
       "id": 30101,
       "file": "Resources/Materials/MainMapMaterials.pak",
-      "bytes": 7202,
-      "sha256": "4d0144c38abfc62750b6e3f59af28d4b4046e297b7fef18b60f42d0d5a069083"
+      "bytes": 9211,
+      "sha256": "9a478cf32c831de10816aca6757bb97e8122320bed92cb114805ede7c48d00b0"
     },
     {
       "id": 30102,
       "file": "Resources/Materials/MainMapMaterials.utoc",
-      "bytes": 801,
-      "sha256": "409e371964dc58c5fb48fe4b98daa7e85a997230817844c7e6fb8235b52d3c8b"
+      "bytes": 919,
+      "sha256": "a18238fa366c31d0e84262b949fd37f752c6a269ae31b29ed1422691de6230a7"
     },
     {
       "id": 30103,
       "file": "Resources/Materials/MainMapMaterials.ucas",
-      "bytes": 303936,
-      "sha256": "a10e083edd0ea4a422c35f9d8eb96df98d2a051d21777386c8ca147ec8eaf024"
+      "bytes": 435040,
+      "sha256": "ca1fd19a24c04298fa397cfa89087cce465619370dcc95df62bc163ade5f1dfc"
     }
   ],
-  "provenance": "Accepted A2.2 saved assets and cooked outputs; external container filenames renamed only in A2.3R.",
+  "provenance": "Accepted A2.2 saved assets and cooked outputs; BCT1 M_BuildingComplexPresent source and five-package WindowsClient candidate accepted from MainMap-BCB.12E-Phase3A-Candidate-20261102-02; resource filenames and IDs retained.",
   "chunks": [
     {
       "PackageId": "0x8A1D6529FC9EAB8A",
@@ -192,10 +218,17 @@
       "ChunkType": "ExportBundleData"
     },
     {
-      "PackageId": "0x694965C3BF095DF1",
+      "PackageId": "0x4B6BCAE3880D204D",
+      "Filename": "../../../StarRupture/Content/Mods/MainMap/Materials/M_BuildingComplexPresent.uasset",
+      "Size": "108685",
+      "Hash": "0xe1b3efa9fdefbba9df07efd74f2d501080017335",
+      "ChunkType": "ExportBundleData"
+    },
+    {
+      "PackageId": "0xC6BDB0758052E096",
       "Filename": "<ContainerHeader>",
-      "Size": "176",
-      "Hash": "0x3a506978767b451b803e5e2f76a46d69ec4283cd",
+      "Size": "208",
+      "Hash": "0x01d563f2f8fea9d6d94f613a2a2314d5032c53d7",
       "ChunkType": "ContainerHeader"
     }
   ]

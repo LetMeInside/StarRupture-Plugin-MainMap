@@ -10,11 +10,15 @@ OUT = ROOT / 'Artifacts'
 OUT.mkdir(parents=True, exist_ok=True)
 M = u.MaterialEditingLibrary
 TOOLS = u.AssetToolsHelpers.get_asset_tools()
-PATHS = ['/Game/Mods/MiniMap/Materials/M_BuildingCompose',
-         '/Game/Mods/MainMap/Materials/M_BuildingPresent',
-         '/Game/Mods/MiniMap/Materials/T_ComposeDefault',
-         '/Game/Mods/MainMap/Materials/T_PresentDefault']
-assert not any(u.EditorAssetLibrary.does_asset_exist(p) for p in PATHS[:2]), 'Existing material: refusing overwrite'
+COMPOSE_MATERIAL = '/Game/Mods/MiniMap/Materials/M_BuildingCompose'
+LEGACY_PRESENT_MATERIAL = '/Game/Mods/MainMap/Materials/M_BuildingPresent'
+BCT1_PRESENT_MATERIAL = '/Game/Mods/MainMap/Materials/M_BuildingComplexPresent'
+COMPOSE_TEXTURE = '/Game/Mods/MiniMap/Materials/T_ComposeDefault'
+PRESENT_TEXTURE = '/Game/Mods/MainMap/Materials/T_PresentDefault'
+PATHS = [COMPOSE_MATERIAL, LEGACY_PRESENT_MATERIAL, COMPOSE_TEXTURE, PRESENT_TEXTURE]
+assert not any(u.EditorAssetLibrary.does_asset_exist(p) for p in
+               [COMPOSE_MATERIAL, LEGACY_PRESENT_MATERIAL, BCT1_PRESENT_MATERIAL]), \
+       'Existing material: refusing overwrite'
 
 def default_texture(path, rgba, srgb):
     if u.EditorAssetLibrary.does_asset_exist(path):
@@ -91,7 +95,7 @@ class Graph:
             self.wire(b, name, 'B', bout)
         return name
 
-g = Graph(PATHS[0], u.MaterialDomain.MD_SURFACE)
+g = Graph(COMPOSE_MATERIAL, u.MaterialDomain.MD_SURFACE)
 for key, value in {'shading_model': u.MaterialShadingModel.MSM_UNLIT, 'two_sided': True,
                    'disable_depth_test': True, 'use_translucency_vertex_fog': False,
                    'apply_cloud_fogging': False, 'compute_fog_per_pixel': False,
@@ -125,7 +129,7 @@ em = g.binary('AssociatedColor', 'Multiply', ct, s)
 g.output(em, u.MaterialProperty.MP_EMISSIVE_COLOR)
 g.output(s, u.MaterialProperty.MP_OPACITY)
 
-g = Graph(PATHS[1], u.MaterialDomain.MD_UI)
+g = Graph(LEGACY_PRESENT_MATERIAL, u.MaterialDomain.MD_UI)
 g.node('UV0', 'TextureCoordinate', coordinate_index=0)
 g.node('BuildingTarget', 'TextureSampleParameter2D', parameter_name='BuildingTarget', texture=clear,
        sampler_type=u.MaterialSamplerType.SAMPLERTYPE_LINEAR_COLOR, automatic_view_mip_bias=False)
@@ -135,15 +139,44 @@ opacity = g.unary('PresentationCoverage', 'Saturate', inv)
 g.output('BuildingTarget', u.MaterialProperty.MP_EMISSIVE_COLOR, output='RGB')
 g.output(opacity, u.MaterialProperty.MP_OPACITY)
 
+g = Graph(BCT1_PRESENT_MATERIAL, u.MaterialDomain.MD_UI)
+g.node('UV0', 'TextureCoordinate', coordinate_index=0)
+g.node('UVScale', 'VectorParameter', parameter_name='UVScale',
+       default_value=u.LinearColor(1.0, 1.0, 0.0, 0.0))
+g.node('UVBias', 'VectorParameter', parameter_name='UVBias',
+       default_value=u.LinearColor(0.0, 0.0, 0.0, 0.0))
+g.node('UVScaleXY', 'ComponentMask', r=True, g=True, b=False, a=False)
+g.wire('UVScale', 'UVScaleXY', '')
+g.node('UVBiasXY', 'ComponentMask', r=True, g=True, b=False, a=False)
+g.wire('UVBias', 'UVBiasXY', '')
+g.binary('ScaledUV', 'Multiply', 'UV0', 'UVScaleXY')
+g.binary('TransformedUV', 'Add', 'ScaledUV', 'UVBiasXY')
+g.node('TileTexture', 'TextureSampleParameter2D', parameter_name='TileTexture', texture=clear,
+       sampler_type=u.MaterialSamplerType.SAMPLERTYPE_LINEAR_COLOR, automatic_view_mip_bias=False)
+g.wire('TransformedUV', 'TileTexture', 'UVs')
+inv = g.unary('OneMinusTransmittance', 'OneMinus', 'TileTexture', output='A')
+opacity = g.unary('PresentationCoverage', 'Saturate', inv)
+g.output('TileTexture', u.MaterialProperty.MP_EMISSIVE_COLOR, output='RGB')
+g.output(opacity, u.MaterialProperty.MP_OPACITY)
+
 for g in graphs:
     M.layout_material_expressions(g.mat)
     M.recompile_material(g.mat)
     assert u.EditorAssetLibrary.save_loaded_asset(g.mat)
     assert M.get_num_material_expressions(g.mat) == len(g.nodes)
     names = [str(x) for x in M.get_texture_parameter_names(g.mat)]
-    expected = 'SpriteAtlas' if 'Compose' in g.mat.get_name() else 'BuildingTarget'
-    assert names == [expected], names
-    g.record['verified_parameters'] = names
+    if g.mat.get_name() == 'M_BuildingCompose':
+        assert names == ['SpriteAtlas'], names
+        vectors = []
+    elif g.mat.get_name() == 'M_BuildingPresent':
+        assert names == ['BuildingTarget'], names
+        vectors = []
+    else:
+        assert g.mat.get_name() == 'M_BuildingComplexPresent'
+        assert names == ['TileTexture'], names
+        vectors = [str(x) for x in M.get_vector_parameter_names(g.mat)]
+        assert sorted(vectors) == ['UVBias', 'UVScale'], vectors
+    g.record['verified_parameters'] = {'texture': names, 'vector': vectors}
     g.record['expression_count'] = M.get_num_material_expressions(g.mat)
     task = u.AssetExportTask()
     task.object = g.mat
@@ -153,4 +186,4 @@ for g in graphs:
     task.prompt = False
     assert u.Exporter.run_asset_export_task(task), 'T3D export failed'
 (OUT / 'authored-graphs.json').write_text(json.dumps([g.record for g in graphs], indent=2))
-u.log('A2.2: two parent materials authored and saved; graph exports completed.')
+u.log('Material authoring: parent materials authored and saved; graph exports completed.')
