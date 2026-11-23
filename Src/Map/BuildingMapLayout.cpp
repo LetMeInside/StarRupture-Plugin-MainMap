@@ -308,37 +308,35 @@ namespace MainMapBuildingLayout
             plan.mapSize.X > 0 && plan.mapSize.Y > 0;
     }
 
-    /** Sets a slot position once and verifies both values before claiming ownership. */
+    /** Writes a requested position only when live slot values differ and verifies native readback. */
     bool BuildingMapLayout::WritePosition(SDK::UCanvasPanelSlot* slot, SlotState& state,
         const SDK::FVector2D& value)
     {
-        if (SamePoint(state.applied.position, value))
-        {
-            state.positionOwned = true;
-            return true;
-        }
-
+        auto layout = slot->GetLayout();
+        const SDK::FVector2D current{layout.Offsets.Left, layout.Offsets.Top};
         state.applied.position = value;
         state.positionOwned = true;
-        slot->SetPosition(value);
-        const auto layout = slot->GetLayout();
+        if (!SamePoint(current, value))
+        {
+            slot->SetPosition(value);
+            layout = slot->GetLayout();
+        }
         return SamePoint({layout.Offsets.Left, layout.Offsets.Top}, value);
     }
 
-    /** Sets an explicit slot size and verifies its width and height readback. */
+    /** Writes a requested size only when live slot values differ and verifies native readback. */
     bool BuildingMapLayout::WriteSize(SDK::UCanvasPanelSlot* slot, SlotState& state,
         const SDK::FVector2D& value)
     {
-        if (SamePoint(state.applied.size, value))
-        {
-            state.sizeOwned = true;
-            return true;
-        }
-
+        auto layout = slot->GetLayout();
+        const SDK::FVector2D current{layout.Offsets.Right, layout.Offsets.Bottom};
         state.applied.size = value;
         state.sizeOwned = true;
-        slot->SetSize(value);
-        const auto layout = slot->GetLayout();
+        if (!SamePoint(current, value))
+        {
+            slot->SetSize(value);
+            layout = slot->GetLayout();
+        }
         return SamePoint({layout.Offsets.Right, layout.Offsets.Bottom}, value);
     }
 
@@ -446,6 +444,7 @@ namespace MainMapBuildingLayout
                     state.applied.position.X, state.applied.position.Y);
             return false;
         }
+        state.applied.position = state.original.position;
         state.positionOwned = false;
         return true;
     }
@@ -473,6 +472,7 @@ namespace MainMapBuildingLayout
                     state.applied.size.X, state.applied.size.Y);
             return false;
         }
+        state.applied.size = state.original.size;
         state.sizeOwned = false;
         return true;
     }
@@ -731,7 +731,7 @@ namespace MainMapBuildingLayout
         {
             const bool hadPendingLayout = waitingForSlate_;
             waitingForSlate_ = false;
-            if ((expanded_ || hadPendingLayout) && !Restore())
+            if ((expanded_ || hadPendingLayout || !restored_) && !Restore())
             {
                 failedMenu_ = menu;
                 LOG_WARN("MainMap: ExpandedMap disable could not verify complete native layout restoration");
@@ -739,6 +739,7 @@ namespace MainMapBuildingLayout
             }
             expanded_ = false;
             lastAvailable_ = {};
+            failedMenu_ = nullptr;
             return UpdateResult::Ready;
         }
 
@@ -766,8 +767,9 @@ namespace MainMapBuildingLayout
         {
             const bool hasOutstandingLeases = menu_ || canvasRootSlot_ || legend_.slot || zoom_.slot ||
                 frame_.slot || map_.slot || buttons_.slot;
-            if (hasOutstandingLeases)
-                ReleaseLeases();
+            if (hasOutstandingLeases && !ReleaseLeases())
+                return UpdateResult::Ready;
+            failedMenu_ = nullptr;
             return UpdateResult::Ready;
         }
 

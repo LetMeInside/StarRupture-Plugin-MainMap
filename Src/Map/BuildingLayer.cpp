@@ -51,6 +51,7 @@ namespace
         bool closing=false;
         bool terrainDestructionStarted=false;
         bool presentationRetired=false;
+        bool buildingLayerDisabled=false;
         bool providerWorldValid=false;
         bool viewportScaleObserved=false;
         bool zoomSettlementPending=false;
@@ -360,19 +361,21 @@ namespace
                 &session,"presentation-resource-release-rejected");
             return false;
         }
-        if (!MainMapBuildingMap::BuildingMapTarget::InvalidateGridPlanInputShared())
+        if (!session.buildingLayerDisabled &&
+            !MainMapBuildingMap::BuildingMapTarget::InvalidateGridPlanInputShared())
         {
-            LogSessionGate(session.diagnosticCleanupDeferrals, 4, "terrain session cleanup deferred",
-                &session, "grid-resource-release-rejected");
+            LogSessionGate(session.diagnosticCleanupDeferrals,2,"terrain session cleanup deferred",
+                &session,"grid-resource-release-rejected");
             return false;
         }
-        if (!MainMapBuildingMap::BuildingMapTarget::RetireShared())
+        if (!session.buildingLayerDisabled && !MainMapBuildingMap::BuildingMapTarget::RetireShared())
         {
             LogSessionGate(session.diagnosticCleanupDeferrals,2,"terrain session cleanup deferred",
                 &session,"composition-resource-release-rejected");
             return false;
         }
-        g_buildingMapRemote.CloseViewport();
+        if (!session.buildingLayerDisabled)
+            g_buildingMapRemote.CloseViewport();
         session.ResetProviderViewportState();
         if (!session.RestoreLayoutAndRelease())
             return false;
@@ -691,6 +694,37 @@ namespace MainMapBuildingLayer
             Close("session terrain/canvas changed");
             return;
         }
+
+        if (!Config::Get().ShowBuildingLayer)
+        {
+            if (!session.buildingLayerDisabled)
+            {
+                if (!session.RetirePresentation()) return;
+                if (!MainMapBuildingMap::BuildingMapTarget::InvalidateGridPlanInputShared()) return;
+                if (!MainMapBuildingMap::BuildingMapTarget::RetireShared()) return;
+                g_buildingMapRemote.CloseViewport();
+                session.ResetProviderViewportState();
+                session.buildingLayerDisabled=true;
+            }
+
+            MainMapBuildingLayer::ConsumerContext fogContext{};
+            SDK::UCanvasPanel* fogCanvas=nullptr;
+            SDK::UWidgetTree* fogTree=nullptr;
+            if (TryGetConsumerContext(fogContext) &&
+                TryGetTilePresentationContext(fogCanvas, fogTree))
+            {
+                session.presentationRetired=false;
+                MainMapBuildingMap::BuildingMapPresentation::UpdateNativeFogShared(
+                    fogContext, fogCanvas, fogTree);
+            }
+            else if (!session.presentationRetired && !session.RetirePresentation())
+            {
+                return;
+            }
+            return;
+        }
+
+        session.buildingLayerDisabled=false;
         MainMapBuildingLayer::ConsumerContext context{};
         SDK::UCanvasPanel* presentationCanvas=nullptr;
         SDK::UWidgetTree* presentationTree=nullptr;
@@ -840,17 +874,19 @@ namespace MainMapBuildingLayer
             LOG_WARN("MainMap: map-menu deactivation deferred; presentation owners retained");
             return;
         }
-        if (!MainMapBuildingMap::BuildingMapTarget::InvalidateGridPlanInputShared())
+        if (!session.buildingLayerDisabled &&
+            !MainMapBuildingMap::BuildingMapTarget::InvalidateGridPlanInputShared())
         {
             LOG_WARN("MainMap: map-menu deactivation deferred; grid-input owners retained");
             return;
         }
-        if (!MainMapBuildingMap::BuildingMapTarget::RetireShared())
+        if (!session.buildingLayerDisabled && !MainMapBuildingMap::BuildingMapTarget::RetireShared())
         {
             LOG_WARN("MainMap: map-menu deactivation deferred; composition owners retained");
             return;
         }
-        g_buildingMapRemote.CloseViewport();
+        if (!session.buildingLayerDisabled)
+            g_buildingMapRemote.CloseViewport();
         session.ResetProviderViewportState();
         if (session.layout && !session.layout->RestoreAndRelease())
             LOG_WARN("MainMap: map-menu deactivation deferred; native layout owners retained");

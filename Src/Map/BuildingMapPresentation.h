@@ -1,5 +1,5 @@
-// Owns six physical target publications and pools cropped images inside validated native terrain segments.
-// Overlap images share their target slot's presentation MID and detach before target mutation.
+// Owns six physical target publications, native segment associations, and cropped overlap images.
+// It also applies HideFoW to validated native fog images and restores their saved visibility.
 #pragma once
 
 #include "BuildingLayer.h"
@@ -13,6 +13,7 @@
 
 namespace SDK
 {
+    enum class ESlateVisibility : std::uint8_t;
     class UCanvasPanel;
     class UCanvasPanelSlot;
     class UImage;
@@ -28,7 +29,7 @@ namespace SDK
 
 namespace MainMapBuildingMap
 {
-    /** Presents six assigned composites through reusable segment-local images without owning their composition. */
+    /** Presents assigned composites and controls native fog visibility through validated segment images. */
     class BuildingMapPresentation final
     {
     public:
@@ -44,6 +45,9 @@ namespace MainMapBuildingMap
             const std::array<BuildingMapTarget::CompositeTargetInfo,
                 BuildingMapGridPlanner::kPhysicalSlotCount>& targets,
             bool sourceSnapshotCurrent, bool materialResourcesReady);
+        /** Maintains native fog preference without running the building overlay pipeline. */
+        static bool UpdateNativeFogShared(const MainMapBuildingLayer::ConsumerContext& context,
+            SDK::UCanvasPanel* canvas, SDK::UWidgetTree* tree);
         /** Detaches all owned overlap images and releases retained objects in dependency order. */
         static bool RetireShared(bool widgetDestructionStarted = false) noexcept;
 
@@ -78,6 +82,9 @@ namespace MainMapBuildingMap
             const std::array<BuildingMapTarget::CompositeTargetInfo,
                 BuildingMapGridPlanner::kPhysicalSlotCount>& targets,
             bool sourceSnapshotCurrent, bool materialResourcesReady);
+        /** Validates native segments and applies HideFoW without touching building targets. */
+        bool UpdateNativeFog(const MainMapBuildingLayer::ConsumerContext& context,
+            SDK::UCanvasPanel* canvas, SDK::UWidgetTree* tree);
         /** Builds or validates native segment identities and data-derived world bounds for this session. */
         bool ReconcileNativeSegments(const MainMapBuildingLayer::ConsumerContext& context,
             SDK::UCanvasPanel* terrainCanvas, SDK::UWidgetTree* terrainTree);
@@ -90,6 +97,12 @@ namespace MainMapBuildingMap
         bool RetireNativeSegmentAssociations() noexcept;
         /** Releases every retained native widget and slot lease without discarding rejected ownership. */
         bool ReleaseNativeSegmentAssociations() noexcept;
+        /** Applies the configured native-map fog preference only when it or the segment set changes. */
+        bool ApplyNativeFogPreference(bool hideFog) noexcept;
+        /** Restores captured native fog visibility before segment leases are released. */
+        bool RestoreNativeFogPresentation() noexcept;
+        /** Rejects destroyed native widgets before any typed UI access. */
+        bool IsLiveNativeFogImage(SDK::UObject* object) const noexcept;
         /** Associates one segment by matching its actual native slot geometry to a terrain data record. */
         bool TryAssociateNativeSegment(SDK::UCrUW_MapMenuTerrainSegment* segment,
             SDK::UCanvasPanel* terrainCanvas, SDK::UCrMapMenuTerrainData* data,
@@ -325,7 +338,7 @@ namespace MainMapBuildingMap
             bool HasLastFailure = false;
 #endif
         };
-        /** One actual native segment identity and its data-derived world bounds. */
+        /** Retains one native segment identity, geometry, and reversible fog visibility state. */
         struct NativeSegmentAssociation final
         {
             MainMapNative::StrongObjectLease segment;
@@ -336,6 +349,8 @@ namespace MainMapBuildingMap
             MainMapNative::StrongObjectLease terrainImageSlot;
             MainMapNative::StrongObjectLease fogImageSlot;
             MainMapNative::StrongObjectLease canvas;
+            SDK::ESlateVisibility originalFogVisibility{};
+            bool hasOriginalFogVisibility = false;
             MainMapBuildingLayer::WorldRect bounds{};
             std::int32_t gridX = 0;
             std::int32_t gridY = 0;
@@ -377,6 +392,8 @@ namespace MainMapBuildingMap
         bool hasLoggedActiveOverlapCount_ = false;
         bool consumerCountReportPending_ = false;
         bool nativeAssociationFailureLogged_ = false;
+        bool nativeFogPreferenceObserved_ = false;
+        bool nativeFogPreference_ = false;
         std::int32_t rejectedSegmentIndex_ = -1;
         bool overlapGeometryReady_ = false;
         double nativeSegmentWidth_ = 0.0;

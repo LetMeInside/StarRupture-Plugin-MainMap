@@ -1,8 +1,10 @@
 // Presents six retained composite assignments as cropped images inside native terrain segments.
-// Segment associations and owned overlap images remain leased through admitted withdrawal and retirement.
+// Segment associations control native fog visibility and remain leased through admitted withdrawal and retirement.
 #include "BuildingMapPresentation.h"
 
 #include "ChimeraUI_classes.hpp"
+#include "Config/Config.h"
+#include "CoreUObject_classes.hpp"
 #include "Engine_classes.hpp"
 #include "MaterialProof.h"
 #include "SlateCore_structs.hpp"
@@ -45,6 +47,14 @@ namespace MainMapBuildingMap
     {
         return SharedOwner().UpdateGrid(context, canvas, tree, targets,
             sourceSnapshotCurrent, materialResourcesReady);
+    }
+
+    /** Maintains only the native fog preference while the building overlay is disabled. */
+    bool BuildingMapPresentation::UpdateNativeFogShared(
+        const MainMapBuildingLayer::ConsumerContext& context,
+        SDK::UCanvasPanel* canvas, SDK::UWidgetTree* tree)
+    {
+        return SharedOwner().UpdateNativeFog(context, canvas, tree);
     }
 
     /** Detaches owned overlap images and releases the presentation owner through admitted operations. */
@@ -155,6 +165,24 @@ namespace MainMapBuildingMap
         return succeeded;
     }
 
+    /** Validates the current native segment set and applies HideFoW without building work. */
+    bool BuildingMapPresentation::UpdateNativeFog(
+        const MainMapBuildingLayer::ConsumerContext& context,
+        SDK::UCanvasPanel* canvas, SDK::UWidgetTree* tree)
+    {
+        if (!MainMapNative::CanOperate() || !MainMapNative::IsGameThread() ||
+            !context.world || !context.epoch || !canvas || !tree) return false;
+        if (epoch_ && epoch_ != context.epoch && !Retire(false)) return false;
+        epoch_ = context.epoch;
+        if (!ReconcileNativeSegments(context, canvas, tree))
+        {
+            RestoreNativeFogPresentation();
+            return false;
+        }
+        StoreGridAttachmentIdentity(canvas, tree);
+        return ApplyNativeFogPreference(Config::Get().HideFoW);
+    }
+
     /** Reconciles native and overlap geometry, reporting an invalid segment association once per failure period. */
     bool BuildingMapPresentation::ReconcilePresentationGeometry(
         const MainMapBuildingLayer::ConsumerContext& context, SDK::UCanvasPanel* canvas,
@@ -164,6 +192,7 @@ namespace MainMapBuildingMap
     {
         if (!ReconcileNativeSegments(context, canvas, tree))
         {
+            RestoreNativeFogPresentation();
             if (!WithdrawAllGridSlots()) return false;
             if (!nativeAssociationFailureLogged_)
             {
@@ -178,6 +207,7 @@ namespace MainMapBuildingMap
             return false;
         }
         nativeAssociationFailureLogged_ = false;
+        ApplyNativeFogPreference(Config::Get().HideFoW);
         return ReconcileOverlapGeometry(targets);
     }
 
@@ -333,6 +363,7 @@ namespace MainMapBuildingMap
     /** Releases each retained native object explicitly so rejected releases stay retryable. */
     bool BuildingMapPresentation::ReleaseNativeSegmentAssociations() noexcept
     {
+        if (!RestoreNativeFogPresentation()) return false;
         for (auto& association : nativeSegments_)
         {
             if (!association.terrainImage.Reset() || !association.fogImage.Reset() ||
@@ -342,7 +373,81 @@ namespace MainMapBuildingMap
                 !association.segment.Reset()) return false;
         }
         nativeSegments_.clear();
+        nativeFogPreferenceObserved_ = false;
         return true;
+    }
+
+    /** Applies HideFoW to the validated native fog images and skips unchanged preferences. */
+    bool BuildingMapPresentation::ApplyNativeFogPreference(bool hideFog) noexcept
+    {
+        if (!MainMapNative::CanOperate() || !MainMapNative::IsGameThread()) return false;
+        if (nativeFogPreferenceObserved_ && nativeFogPreference_ == hideFog) return true;
+        if (!hideFog)
+        {
+            if (!RestoreNativeFogPresentation()) return false;
+            nativeFogPreference_ = false;
+            nativeFogPreferenceObserved_ = true;
+            return true;
+        }
+
+        for (auto& association : nativeSegments_)
+        {
+            if (association.hasOriginalFogVisibility) continue;
+            auto* object = association.fogImage.Get();
+            if (!IsLiveNativeFogImage(object)) return false;
+            auto* image = static_cast<SDK::UImage*>(object);
+            association.originalFogVisibility = image->GetVisibility();
+            association.hasOriginalFogVisibility = true;
+            if (association.originalFogVisibility != SDK::ESlateVisibility::Hidden)
+                image->SetVisibility(SDK::ESlateVisibility::Hidden);
+            if (image->GetVisibility() != SDK::ESlateVisibility::Hidden)
+            {
+                association.hasOriginalFogVisibility = false;
+                return false;
+            }
+        }
+        nativeFogPreference_ = true;
+        nativeFogPreferenceObserved_ = true;
+        return true;
+    }
+
+    /** Restores every still-live fog image without dereferencing destroyed UObjects. */
+    bool BuildingMapPresentation::RestoreNativeFogPresentation() noexcept
+    {
+        if (!MainMapNative::CanOperate() || !MainMapNative::IsGameThread()) return false;
+        for (auto& association : nativeSegments_)
+        {
+            if (!association.hasOriginalFogVisibility) continue;
+            auto* object = association.fogImage.Get();
+            if (!IsLiveNativeFogImage(object))
+            {
+                association.hasOriginalFogVisibility = false;
+                continue;
+            }
+            auto* image = static_cast<SDK::UImage*>(object);
+            if (image->GetVisibility() != association.originalFogVisibility)
+                image->SetVisibility(association.originalFogVisibility);
+            if (image->GetVisibility() != association.originalFogVisibility) return false;
+            association.hasOriginalFogVisibility = false;
+        }
+        nativeFogPreference_ = false;
+        nativeFogPreferenceObserved_ = false;
+        return true;
+    }
+
+    /** Confirms a retained fog image is a live UImage before using its typed visibility API. */
+    bool BuildingMapPresentation::IsLiveNativeFogImage(SDK::UObject* object) const noexcept
+    {
+        if (!object) return false;
+        const auto invalid = SDK::EObjectFlags::ClassDefaultObject | SDK::EObjectFlags::ArchetypeObject |
+            SDK::EObjectFlags::InheritableComponentTemplate | SDK::EObjectFlags::BeginDestroyed |
+            SDK::EObjectFlags::FinishDestroyed;
+        auto* current = object;
+        for (int depth = 0; current && depth < 32; ++depth, current = current->Outer)
+            if ((static_cast<unsigned>(current->Flags) & static_cast<unsigned>(invalid)) != 0)
+                return false;
+        if (current) return false;
+        return object->IsA(SDK::UImage::StaticClass());
     }
 
     /** Matches one live segment's actual canvas slot against its native grid record without using array order. */
