@@ -1,6 +1,7 @@
 ﻿#include "plugin.h"
 #include "plugin_helpers.h"
 #include "Config/Config.h"
+#include "resource.h"
 #ifdef MODLOADER_CLIENT_BUILD
 #include "Native/Fingerprints.h"
 #include "Native/NativeApi.h"
@@ -38,10 +39,6 @@ namespace
 }
 #endif
 
-#ifndef MODLOADER_BUILD_TAG
-#define MODLOADER_BUILD_TAG "0.1.0"
-#endif
-
 #ifdef MODLOADER_SERVER_BUILD
 #define MAINMAP_EXPORTS_TARGET PLUGIN_TARGET_SERVER
 #else
@@ -50,7 +47,7 @@ namespace
 
 static PluginInfo s_pluginInfo = {
     "MainMap",
-    MODLOADER_BUILD_TAG,
+    MAINMAP_VERSION_STRING,
     "Kian369",
     "TODO: Add plugin description",
     PLUGIN_INTERFACE_VERSION,
