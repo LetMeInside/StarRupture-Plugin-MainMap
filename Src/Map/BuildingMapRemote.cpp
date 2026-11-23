@@ -155,14 +155,16 @@ namespace MainMapBuildingMap
 
     /** Updates even an unchanged rectangle, validates ownership again, and polls current images. */
     bool BuildingMapRemote::AdvanceViewportAndPoll(double xMapUnits, double yMapUnits,
-        double widthMapUnits, double heightMapUnits, bool& updateAccepted)
+        double widthMapUnits, double heightMapUnits,
+        BuildingMapABISchedulingPreference schedulingPreference,
+        bool& updateAccepted)
     {
         updateAccepted = false;
 #if defined(_DEBUG)
         const auto updateStarted = std::chrono::steady_clock::now();
 #endif
         auto result = table_.UpdateViewport(viewport_, xMapUnits, yMapUnits,
-            widthMapUnits, heightMapUnits);
+            widthMapUnits, heightMapUnits, schedulingPreference);
 #if defined(_DEBUG)
         BuildingMapTimingDiagnostics::Record("building-map.provider-update-abi", updateStarted);
 #endif
@@ -224,7 +226,8 @@ namespace MainMapBuildingMap
 
     /** Advances the same rectangle every active tick, then polls the current visible grid. */
     BuildingMapRemote::ViewportUpdateResult BuildingMapRemote::UpdateViewport(double xMapUnits, double yMapUnits,
-        double widthMapUnits, double heightMapUnits)
+        double widthMapUnits, double heightMapUnits,
+        BuildingMapABISchedulingPreference schedulingPreference)
     {
         pollState_ = PollState::Incomplete;
         if (!IsAdmittedGameThread())
@@ -246,7 +249,7 @@ namespace MainMapBuildingMap
         }
         bool updateAccepted = false;
         const bool pollCompleted=AdvanceViewportAndPoll(xMapUnits, yMapUnits,
-            widthMapUnits, heightMapUnits, updateAccepted);
+            widthMapUnits, heightMapUnits, schedulingPreference, updateAccepted);
         if (!pollCompleted)
         {
             availability_ = Availability::Failure;

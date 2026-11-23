@@ -67,9 +67,10 @@ namespace MainMapBuildingMap
         using SectionCoordinate = std::pair<int64_t, int64_t>;
         using NoImageCollection = std::vector<SectionCoordinate>;
 
-        /** Updates an active demand with unchanged map-unit rectangle values and polls its images. */
+        /** Updates an active demand, passes one call-scoped provider preference, and polls its images. */
         ViewportUpdateResult UpdateViewport(double xMapUnits, double yMapUnits,
-            double widthMapUnits, double heightMapUnits);
+            double widthMapUnits, double heightMapUnits,
+            BuildingMapABISchedulingPreference schedulingPreference);
         /** Closes valid provider ownership when callable and clears all consumer image state. */
         void CloseViewport();
         /** Releases a viewport during the existing plugin shutdown path. */
@@ -98,9 +99,11 @@ namespace MainMapBuildingMap
         /** Checks provider/session/handle state and prepares valid ownership for this demand. */
         bool PrepareViewport(double xMapUnits, double yMapUnits, double widthMapUnits, double heightMapUnits,
             bool& opened);
-        /** Advances one provider update and polls the resulting current viewport grid. */
+        /** Advances one provider update with its preference and polls the resulting current viewport grid. */
         bool AdvanceViewportAndPoll(double xMapUnits, double yMapUnits,
-            double widthMapUnits, double heightMapUnits, bool& updateAccepted);
+            double widthMapUnits, double heightMapUnits,
+            BuildingMapABISchedulingPreference schedulingPreference,
+            bool& updateAccepted);
         /** Copies each visible cell and commits availability/NO_IMAGE state only after a full poll. */
         bool PollVisibleImages(uint64_t visibleWidth, uint64_t visibleHeight);
         /** Observes one cell and copies pixels only when no retained image matches its metadata. */

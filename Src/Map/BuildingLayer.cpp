@@ -733,7 +733,8 @@ namespace MainMapBuildingLayer
         const auto providerStarted = std::chrono::steady_clock::now();
 #endif
         const auto viewportUpdate=g_buildingMapRemote.UpdateViewport(requestedWorld.minX,requestedWorld.minY,
-            requestedWorld.maxX-requestedWorld.minX,requestedWorld.maxY-requestedWorld.minY);
+            requestedWorld.maxX-requestedWorld.minX,requestedWorld.maxY-requestedWorld.minY,
+            BUILDING_MAP_ABI_SCHEDULING_PREFERENCE_INTERACTIVE);
 #if defined(_DEBUG)
         MainMapBuildingMap::BuildingMapTimingDiagnostics::Record("building-map.remote-update", providerStarted);
 #endif
