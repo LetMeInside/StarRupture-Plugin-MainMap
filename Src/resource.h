@@ -1,6 +1,6 @@
 #pragma once
-#define VERSION_MAJOR 0
-#define VERSION_MINOR 1
+#define VERSION_MAJOR 1
+#define VERSION_MINOR 0
 #define VERSION_PATCH 0
 #define MAINMAP_STRINGIZE_DETAIL(value) #value
 #define MAINMAP_STRINGIZE(value) MAINMAP_STRINGIZE_DETAIL(value)

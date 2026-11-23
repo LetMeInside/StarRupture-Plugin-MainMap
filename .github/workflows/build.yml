@@ -1,0 +1,274 @@
+name: Build MainMap
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish GitHub Release"
+        required: true
+        type: boolean
+        default: false
+
+# The plugin version is defined only in Src/resource.h.
+env:
+  PLUGIN_NAME: MainMap
+  SOLUTION_FILE: MainMap.sln
+  VERSION_HEADER: Src/resource.h
+  CLIENT_CONFIGURATION: Client Release
+
+jobs:
+  build:
+    name: Build Client
+    runs-on: windows-latest
+    if: ${{ inputs.publish || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop' }}
+    permissions:
+      contents: write
+
+    steps:
+      - name: Reject publication outside main
+        if: ${{ inputs.publish && github.ref != 'refs/heads/main' }}
+        shell: pwsh
+        run: |
+          throw "Publication is only allowed from main. Run this workflow on main with publish=true, or use publish=false for a develop build."
+
+      - name: Checkout plugin
+        uses: actions/checkout@v4
+
+      - name: Show build revision
+        shell: pwsh
+        run: |
+          Write-Host "Repository : $env:GITHUB_REPOSITORY"
+          Write-Host "Ref        : $env:GITHUB_REF"
+          Write-Host "Commit     : $env:GITHUB_SHA"
+          Write-Host "Workspace  : $env:GITHUB_WORKSPACE"
+
+      - name: Checkout StarRupture Plugin SDK
+        uses: actions/checkout@v4
+        with:
+          repository: AlienXAXS/StarRupture-Plugin-SDK
+          path: plugin-sdk
+          submodules: recursive
+
+      - name: Verify SDK checkout
+        shell: pwsh
+        run: |
+          $sdkRoot = Join-Path $env:GITHUB_WORKSPACE "plugin-sdk"
+          $requiredFiles = @(
+            (Join-Path $sdkRoot "PluginGameBuild.props"),
+            (Join-Path $sdkRoot "include\plugin_interface.h"),
+            (Join-Path $sdkRoot "StarRupture SDK\Client\SDK\Basic.cpp")
+          )
+
+          foreach ($file in $requiredFiles) {
+            if (-not (Test-Path $file)) {
+              throw "Required StarRupture Plugin SDK file not found: $file"
+            }
+          }
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Extract source version
+        shell: pwsh
+        run: |
+          $resourcePath = Join-Path $env:GITHUB_WORKSPACE $env:VERSION_HEADER
+          if (-not (Test-Path $resourcePath)) {
+            throw "Version header not found: $resourcePath"
+          }
+
+          $resource = Get-Content $resourcePath -Raw
+          $majorMatch = [regex]::Match($resource, '#define\s+VERSION_MAJOR\s+(\d+)')
+          $minorMatch = [regex]::Match($resource, '#define\s+VERSION_MINOR\s+(\d+)')
+          $patchMatch = [regex]::Match($resource, '#define\s+VERSION_PATCH\s+(\d+)')
+
+          if (-not ($majorMatch.Success -and $minorMatch.Success -and $patchMatch.Success)) {
+            throw "Could not determine plugin version from $resourcePath"
+          }
+
+          $version = "$($majorMatch.Groups[1].Value).$($minorMatch.Groups[1].Value).$($patchMatch.Groups[1].Value)"
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "VERSION_TAG=v$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "resource.h version: $version"
+
+      - name: Extract ModLoader interface version range
+        shell: pwsh
+        run: |
+          $interfaceHeader = Join-Path $env:GITHUB_WORKSPACE "plugin-sdk\include\plugin_interface.h"
+          $content = Get-Content $interfaceHeader -Raw
+          $minMatch = [regex]::Match($content, '#define\s+PLUGIN_INTERFACE_VERSION\s+(\d+)')
+          $maxMatch = [regex]::Match($content, '#define\s+PLUGIN_INTERFACE_VERSION_MAX\s+(\d+)')
+
+          if (-not ($minMatch.Success -and $maxMatch.Success)) {
+            throw "Could not determine ModLoader interface version range from $interfaceHeader"
+          }
+
+          $interfaceMin = $minMatch.Groups[1].Value
+          $interfaceMax = $maxMatch.Groups[1].Value
+          "INTERFACE_VERSION_MIN=$interfaceMin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "INTERFACE_VERSION_MAX=$interfaceMax" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Interface version range: $interfaceMin-$interfaceMax"
+
+      - name: Build Client Release
+        shell: pwsh
+        run: |
+          $solution = Join-Path $env:GITHUB_WORKSPACE $env:SOLUTION_FILE
+
+          msbuild $solution `
+            /p:Configuration="$env:CLIENT_CONFIGURATION" `
+            /p:Platform=x64 `
+            "/p:StarRupturePluginSDKRoot=$env:GITHUB_WORKSPACE\plugin-sdk\" `
+            /m `
+            /v:minimal
+
+      - name: Verify build outputs and DLL versions
+        shell: pwsh
+        run: |
+          $clientDll = Join-Path $env:GITHUB_WORKSPACE "bin/x64/$env:CLIENT_CONFIGURATION/plugins/$env:PLUGIN_NAME.dll"
+          $clientPdb = Join-Path $env:GITHUB_WORKSPACE "bin/x64/$env:CLIENT_CONFIGURATION/plugins/$env:PLUGIN_NAME.pdb"
+
+          foreach ($file in @($clientDll, $clientPdb)) {
+            if (-not (Test-Path $file)) {
+              throw "Expected build output not found: $file"
+            }
+
+            $info = Get-Item $file
+            if ($info.Length -eq 0) {
+              throw "Build output is empty: $file"
+            }
+
+            Write-Host "$($info.FullName) - $($info.Length) bytes"
+          }
+
+          $versionInfo = (Get-Item $clientDll).VersionInfo
+          $expectedVersion = "$env:VERSION.0"
+          Write-Host "DLL FileVersion: $($versionInfo.FileVersion)"
+          Write-Host "DLL ProductVersion: $($versionInfo.ProductVersion)"
+
+          if ($versionInfo.FileVersion.Trim() -ne $expectedVersion) {
+            throw "DLL FileVersion mismatch: expected $expectedVersion but found $($versionInfo.FileVersion)"
+          }
+
+          if ($versionInfo.ProductVersion.Trim() -ne $expectedVersion) {
+            throw "DLL ProductVersion mismatch: expected $expectedVersion but found $($versionInfo.ProductVersion)"
+          }
+
+      - name: Prepare Client package
+        shell: pwsh
+        run: |
+          $packageRoot = Join-Path $env:GITHUB_WORKSPACE "package\Client\Plugins"
+          New-Item -ItemType Directory -Force -Path $packageRoot | Out-Null
+
+          $clientDll = Join-Path $env:GITHUB_WORKSPACE "bin/x64/$env:CLIENT_CONFIGURATION/plugins/$env:PLUGIN_NAME.dll"
+          $clientPdb = Join-Path $env:GITHUB_WORKSPACE "bin/x64/$env:CLIENT_CONFIGURATION/plugins/$env:PLUGIN_NAME.pdb"
+          Copy-Item $clientDll (Join-Path $packageRoot "$env:PLUGIN_NAME.dll")
+          Copy-Item $clientPdb (Join-Path $packageRoot "$env:PLUGIN_NAME.pdb")
+          Copy-Item $clientDll (Join-Path $env:GITHUB_WORKSPACE "$env:PLUGIN_NAME-Client.dll")
+
+          $sidecarPath = Join-Path $packageRoot "$env:PLUGIN_NAME.json"
+          @{ manifest_url = "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download/$($env:PLUGIN_NAME)-client-manifest.json" } |
+            ConvertTo-Json |
+            Set-Content -Path $sidecarPath -Encoding utf8
+
+      - name: Create Client release manifest and ZIP
+        shell: pwsh
+        run: |
+          $root = $env:GITHUB_WORKSPACE
+          $manifestPath = Join-Path $root "$env:PLUGIN_NAME-client-manifest.json"
+          $manifest = [ordered]@{
+            plugin_name           = $env:PLUGIN_NAME
+            version               = $env:VERSION
+            interface_version_min = [int]$env:INTERFACE_VERSION_MIN
+            interface_version_max = [int]$env:INTERFACE_VERSION_MAX
+            download_url          = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:VERSION_TAG/$($env:PLUGIN_NAME)-Client.dll"
+          } | ConvertTo-Json
+          Set-Content -Path $manifestPath -Value $manifest -Encoding utf8
+
+          $package = Join-Path $root "package"
+          $zip = Join-Path $root "$env:PLUGIN_NAME-Client-v$env:VERSION.zip"
+          Compress-Archive -Path "$package\*" -DestinationPath $zip -Force
+
+      - name: Validate package and manifests
+        shell: pwsh
+        run: |
+          $root = $env:GITHUB_WORKSPACE
+          $zipPath = Join-Path $root "$env:PLUGIN_NAME-Client-v$env:VERSION.zip"
+          $dllPath = Join-Path $root "$env:PLUGIN_NAME-Client.dll"
+          $manifestPath = Join-Path $root "$env:PLUGIN_NAME-client-manifest.json"
+          $sidecarPath = Join-Path $root "package\Client\Plugins\$env:PLUGIN_NAME.json"
+
+          foreach ($file in @($zipPath, $dllPath, $manifestPath, $sidecarPath)) {
+            if (-not (Test-Path $file) -or (Get-Item $file).Length -eq 0) {
+              throw "Expected non-empty package file not found: $file"
+            }
+          }
+
+          $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+          $expectedUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:VERSION_TAG/$env:PLUGIN_NAME-Client.dll"
+          if ($manifest.plugin_name -ne $env:PLUGIN_NAME -or
+              $manifest.version -ne $env:VERSION -or
+              $manifest.interface_version_min -ne [int]$env:INTERFACE_VERSION_MIN -or
+              $manifest.interface_version_max -ne [int]$env:INTERFACE_VERSION_MAX -or
+              $manifest.download_url -ne $expectedUrl) {
+            throw "Client release manifest values do not match the build"
+          }
+
+          $sidecar = Get-Content $sidecarPath -Raw | ConvertFrom-Json
+          $expectedManifestUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download/$env:PLUGIN_NAME-client-manifest.json"
+          if ($sidecar.manifest_url -ne $expectedManifestUrl) {
+            throw "Client sidecar manifest URL mismatch"
+          }
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+          try {
+            $expectedEntries = @(
+              "Client/Plugins/$env:PLUGIN_NAME.dll",
+              "Client/Plugins/$env:PLUGIN_NAME.pdb",
+              "Client/Plugins/$env:PLUGIN_NAME.json"
+            )
+            foreach ($entry in $expectedEntries) {
+              $zipEntry = $archive.Entries | Where-Object { $_.FullName -eq $entry }
+              if (-not $zipEntry) {
+                throw "Expected ZIP entry is missing: $entry"
+              }
+
+              if ($zipEntry.Length -eq 0) {
+                throw "ZIP entry is empty: $entry"
+              }
+            }
+          }
+          finally {
+            $archive.Dispose()
+          }
+
+      - name: Upload Client build artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.PLUGIN_NAME }}-Client-v${{ env.VERSION }}
+          path: |
+            ${{ github.workspace }}/${{ env.PLUGIN_NAME }}-Client-v${{ env.VERSION }}.zip
+            ${{ github.workspace }}/${{ env.PLUGIN_NAME }}-Client.dll
+            ${{ github.workspace }}/${{ env.PLUGIN_NAME }}-client-manifest.json
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: ${{ inputs.publish && github.ref == 'refs/heads/main' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $root = $env:GITHUB_WORKSPACE
+          $assets = @(
+            (Join-Path $root "$env:PLUGIN_NAME-Client.dll"),
+            (Join-Path $root "$env:PLUGIN_NAME-client-manifest.json"),
+            (Join-Path $root "$env:PLUGIN_NAME-Client-v$env:VERSION.zip")
+          )
+
+          gh release create $env:VERSION_TAG @assets `
+            --title "$env:PLUGIN_NAME $env:VERSION_TAG" `
+            --generate-notes

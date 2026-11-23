@@ -49,7 +49,7 @@ static PluginInfo s_pluginInfo = {
     "MainMap",
     MAINMAP_VERSION_STRING,
     "Kian369",
-    "TODO: Add plugin description",
+    "Adds MiniMap building imagery to the in-game world map.",
     PLUGIN_INTERFACE_VERSION,
     MAINMAP_EXPORTS_TARGET,
     PLUGIN_GAME_BUILT_CL,
