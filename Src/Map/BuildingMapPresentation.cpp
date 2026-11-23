@@ -1,5 +1,5 @@
-// Presents BuildingMapTarget's six retained composite assignments on the terrain widget's own canvas.
-// Each slot's UImage, MID, and target dependencies remain strongly leased until admitted retirement.
+// Presents six retained composite assignments as cropped images inside native terrain segments.
+// Segment associations and owned overlap images remain leased through admitted withdrawal and retirement.
 #include "BuildingMapPresentation.h"
 
 #include "ChimeraUI_classes.hpp"
@@ -13,6 +13,7 @@
 #include <limits>
 #include <new>
 #include <utility>
+#include <algorithm>
 
 namespace MainMapBuildingMap
 {
@@ -33,20 +34,20 @@ namespace MainMapBuildingMap
         return SharedOwner().PrepareGridUpdate(sessionEpoch, assignments, sourceSnapshotCurrent);
     }
 
-    /** Publishes eligible composite targets and updates world geometry only when its input changes. */
+    /** Publishes eligible composites after reconciling changed segment and target bounds. */
     bool BuildingMapPresentation::UpdateGridShared(
         const MainMapBuildingLayer::ConsumerContext& context,
-        const MainMapBuildingLayer::WorldRect& visibleWorld, SDK::UCanvasPanel* canvas,
+        SDK::UCanvasPanel* canvas,
         SDK::UWidgetTree* tree,
         const std::array<BuildingMapTarget::CompositeTargetInfo,
             BuildingMapGridPlanner::kPhysicalSlotCount>& targets,
         bool sourceSnapshotCurrent, bool materialResourcesReady)
     {
-        return SharedOwner().UpdateGrid(context, visibleWorld, canvas, tree, targets,
+        return SharedOwner().UpdateGrid(context, canvas, tree, targets,
             sourceSnapshotCurrent, materialResourcesReady);
     }
 
-    /** Detaches the image and releases the shared presentation owner through admitted operations. */
+    /** Detaches owned overlap images and releases the presentation owner through admitted operations. */
     bool BuildingMapPresentation::RetireShared(bool widgetDestructionStarted) noexcept
     {
         return SharedOwner().Retire(widgetDestructionStarted);
@@ -116,9 +117,9 @@ namespace MainMapBuildingMap
         return true;
     }
 
-    /** Publishes only committed clean assignments and remaps geometry after viewport changes. */
+    /** Publishes clean composites after reconciling segment associations and changed target bounds. */
     bool BuildingMapPresentation::UpdateGrid(const MainMapBuildingLayer::ConsumerContext& context,
-        const MainMapBuildingLayer::WorldRect& visibleWorld, SDK::UCanvasPanel* canvas,
+        SDK::UCanvasPanel* canvas,
         SDK::UWidgetTree* tree,
         const std::array<BuildingMapTarget::CompositeTargetInfo,
             BuildingMapGridPlanner::kPhysicalSlotCount>& targets,
@@ -134,44 +135,629 @@ namespace MainMapBuildingMap
             if (!Retire(false)) return false;
         }
         epoch_ = context.epoch;
-        if (!sourceSnapshotCurrent || !materialResourcesReady)
-        {
-            for (std::size_t slotIndex = 0; slotIndex < gridSlots_.size(); ++slotIndex)
-            {
-                if (!WithdrawGridSlot(slotIndex)) return false;
-            }
-            return true;
-        }
-        bool hasEligibleSlot = false;
-        for (const auto& targetInfo : targets)
-        {
-            if (IsGridTargetEligible(context, targetInfo, sourceSnapshotCurrent))
-                hasEligibleSlot = true;
-        }
-        if (hasEligibleSlot && !EnsureGridParentMaterial(context.world, materialResourcesReady))
-        {
-#if defined(_DEBUG)
-            for (std::size_t slotIndex = 0; slotIndex < targets.size(); ++slotIndex)
-            {
-                if (IsGridTargetEligible(context, targets[slotIndex], sourceSnapshotCurrent))
-                {
-                    ReportGridFailure(slotIndex, targets[slotIndex].Assignment,
-                        targets[slotIndex], 7, "presentation-parent-material-failed");
-                    break;
-                }
-            }
-#endif
+        if (!ReconcilePresentationGeometry(context, canvas, tree, targets)) return false;
+        if (!sourceSnapshotCurrent || !materialResourcesReady) return WithdrawAllGridSlots();
+        if (!EnsureParentForEligibleTargets(context, targets, sourceSnapshotCurrent, materialResourcesReady))
             return false;
-        }
-        const bool geometryChanged = HasGridGeometryInputChanged(context, visibleWorld, canvas, tree);
         bool succeeded = true;
         for (std::size_t slotIndex = 0; slotIndex < targets.size(); ++slotIndex)
         {
             succeeded = UpdateGridSlot(context, canvas, tree, targets[slotIndex],
-                sourceSnapshotCurrent, geometryChanged) && succeeded;
+                sourceSnapshotCurrent) && succeeded;
         }
-        StoreGridGeometryInput(context, visibleWorld, canvas, tree);
+        StoreGridAttachmentIdentity(canvas, tree);
         return succeeded;
+    }
+
+    /** Reconciles native and overlap geometry, reporting an invalid segment association once per failure period. */
+    bool BuildingMapPresentation::ReconcilePresentationGeometry(
+        const MainMapBuildingLayer::ConsumerContext& context, SDK::UCanvasPanel* canvas,
+        SDK::UWidgetTree* tree,
+        const std::array<BuildingMapTarget::CompositeTargetInfo,
+            BuildingMapGridPlanner::kPhysicalSlotCount>& targets)
+    {
+        if (!ReconcileNativeSegments(context, canvas, tree))
+        {
+            if (!WithdrawAllGridSlots()) return false;
+            if (!nativeAssociationFailureLogged_)
+            {
+                auto* terrainObject = tree->Outer;
+                std::int32_t count = -1;
+                if (terrainObject && terrainObject->IsA(SDK::UCrUW_MapMenuTerrain::StaticClass()))
+                    count = static_cast<SDK::UCrUW_MapMenuTerrain*>(terrainObject)->TerrainSegments.Num();
+                LOG_ERROR("MainMap Building Map: native segment association rejected terrain=%p count=%d segment=%d",
+                    terrainObject, count, rejectedSegmentIndex_);
+                nativeAssociationFailureLogged_ = true;
+            }
+            return false;
+        }
+        nativeAssociationFailureLogged_ = false;
+        return ReconcileOverlapGeometry(targets);
+    }
+
+    /** Hides and detaches every physical target's consumers before composition eligibility is lost. */
+    bool BuildingMapPresentation::WithdrawAllGridSlots() noexcept
+    {
+        for (std::size_t slotIndex = 0; slotIndex < gridSlots_.size(); ++slotIndex)
+            if (!WithdrawGridSlot(slotIndex)) return false;
+        return true;
+    }
+
+    /** Loads the shared parent material only if a current committed target is eligible for display. */
+    bool BuildingMapPresentation::EnsureParentForEligibleTargets(
+        const MainMapBuildingLayer::ConsumerContext& context,
+        const std::array<BuildingMapTarget::CompositeTargetInfo,
+            BuildingMapGridPlanner::kPhysicalSlotCount>& targets,
+        bool sourceSnapshotCurrent, bool materialResourcesReady)
+    {
+        bool hasEligibleTarget = false;
+        for (const auto& targetInfo : targets)
+            if (IsGridTargetEligible(context, targetInfo, sourceSnapshotCurrent)) hasEligibleTarget = true;
+        if (!hasEligibleTarget || EnsureGridParentMaterial(context.world, materialResourcesReady)) return true;
+#if defined(_DEBUG)
+        for (std::size_t slotIndex = 0; slotIndex < targets.size(); ++slotIndex)
+        {
+            if (!IsGridTargetEligible(context, targets[slotIndex], sourceSnapshotCurrent)) continue;
+            ReportGridFailure(slotIndex, targets[slotIndex].Assignment,
+                targets[slotIndex], 7, "presentation-parent-material-failed");
+            break;
+        }
+#endif
+        return false;
+    }
+
+    /** Associates each live segment with terrain data and validates both untouched native image parents. */
+    bool BuildingMapPresentation::ReconcileNativeSegments(
+        const MainMapBuildingLayer::ConsumerContext& context,
+        SDK::UCanvasPanel* terrainCanvas, SDK::UWidgetTree* terrainTree)
+    {
+        auto* terrainObject = terrainTree ? terrainTree->Outer : nullptr;
+        auto* settings = SDK::UCrMapMenuDevSettings::GetDefaultObj();
+        auto* data = settings ? settings->TerrainData.Get() : nullptr;
+        if (!terrainObject || !terrainObject->IsA(SDK::UCrUW_MapMenuTerrain::StaticClass()) ||
+            !data || !data->IsA(SDK::UCrMapMenuTerrainData::StaticClass())) return false;
+        auto* terrain = static_cast<SDK::UCrUW_MapMenuTerrain*>(terrainObject);
+        const double originX = data->MapTerrainTopLeftPivotPoint.X;
+        const double originY = data->MapTerrainTopLeftPivotPoint.Y;
+        const double segmentWidth = data->MapTerrainSegmentSize.X;
+        const double segmentHeight = data->MapTerrainSegmentSize.Y;
+        if (terrain->WidgetTree != terrainTree || terrain->CanvasPanelTerrain != terrainCanvas ||
+            data->TerrainSegmentsData.Num() != terrain->TerrainSegments.Num() ||
+            terrain->TerrainSegments.Num() <= 0 || terrain->TerrainSegments.Num() > 36 ||
+            context.epoch != epoch_ || context.originX != originX || context.originY != originY ||
+            !std::isfinite(originX) || !std::isfinite(originY) || segmentWidth <= 0 || segmentHeight <= 0)
+            return false;
+        if (AreNativeSegmentAssociationsCurrent(terrain, data, terrainTree, context,
+            originX, originY, segmentWidth, segmentHeight)) return true;
+        rejectedSegmentIndex_ = -1;
+        if (!RetireNativeSegmentAssociations()) return false;
+        nativeSegments_.reserve(static_cast<std::size_t>(terrain->TerrainSegments.Num()));
+        for (std::int32_t i = 0; i < terrain->TerrainSegments.Num(); ++i)
+        {
+            auto* segment = terrain->TerrainSegments[i];
+            if (!segment || !TryAssociateNativeSegment(segment, terrainCanvas, data,
+                originX, originY, segmentWidth, segmentHeight, nativeSegments_))
+            {
+                rejectedSegmentIndex_ = i;
+                return false;
+            }
+        }
+        for (auto& overlap : overlapImages_) overlap.geometryReady = false;
+        nativeSegmentWidth_ = segmentWidth;
+        nativeSegmentHeight_ = segmentHeight;
+        overlapGeometryReady_ = false;
+        rejectedSegmentIndex_ = -1;
+        LOG_INFO("MainMap Building Map: native segment associations=%llu",
+            static_cast<unsigned long long>(nativeSegments_.size()));
+        return true;
+    }
+
+    /** Reuses the cached association only while every native segment and its two original images remain linked. */
+    bool BuildingMapPresentation::AreNativeSegmentAssociationsCurrent(
+        SDK::UCrUW_MapMenuTerrain* terrain, SDK::UCrMapMenuTerrainData* data,
+        SDK::UWidgetTree* tree, const MainMapBuildingLayer::ConsumerContext& context,
+        double originX, double originY, double segmentWidth, double segmentHeight) const
+    {
+        if (nativeSegments_.size() != static_cast<std::size_t>(terrain->TerrainSegments.Num()) ||
+            lastGridTreeIdentity_ != reinterpret_cast<std::uintptr_t>(tree) ||
+            context.originX != originX || context.originY != originY ||
+            nativeSegmentWidth_ != segmentWidth || nativeSegmentHeight_ != segmentHeight) return false;
+        for (std::int32_t i = 0; i < terrain->TerrainSegments.Num(); ++i)
+        {
+            auto* segment = terrain->TerrainSegments[i];
+            const NativeSegmentAssociation* associationForSegment = nullptr;
+            for (const auto& association : nativeSegments_)
+                if (association.segment.Get() == segment) associationForSegment = &association;
+            if (!associationForSegment || !segment || !segment->ImageTerrain || !segment->ImageFow ||
+                !segment->ImageTerrain->Slot || !segment->ImageFow->Slot ||
+                !segment->ImageTerrain->Slot->IsA(SDK::UCanvasPanelSlot::StaticClass()) ||
+                !segment->ImageFow->Slot->IsA(SDK::UCanvasPanelSlot::StaticClass()) ||
+                segment->ImageTerrain->GetParent() != segment->ImageFow->GetParent() ||
+                !segment->ImageTerrain->GetParent() ||
+                !segment->ImageTerrain->GetParent()->IsA(SDK::UCanvasPanel::StaticClass()) ||
+                segment->GetParent() != terrain->CanvasPanelTerrain) return false;
+            if (associationForSegment->canvas.Get() != segment->ImageTerrain->GetParent()) return false;
+            if (associationForSegment->terrainImage.Get() != segment->ImageTerrain ||
+                associationForSegment->fogImage.Get() != segment->ImageFow ||
+                associationForSegment->segmentTree.Get() != segment->WidgetTree ||
+                associationForSegment->segmentSlot.Get() != segment->Slot ||
+                associationForSegment->terrainImageSlot.Get() != segment->ImageTerrain->Slot ||
+                associationForSegment->fogImageSlot.Get() != segment->ImageFow->Slot) return false;
+            if (!segment->Slot || !segment->Slot->IsA(SDK::UCanvasPanelSlot::StaticClass())) return false;
+            auto* segmentSlot = static_cast<SDK::UCanvasPanelSlot*>(segment->Slot);
+            const auto position = segmentSlot->GetPosition();
+            const auto size = segmentSlot->GetSize();
+            const double gridX = associationForSegment->gridX * segmentWidth;
+            const double gridY = associationForSegment->gridY * segmentHeight;
+            const bool slotMatchesData = std::abs(position.X - gridX) <= 0.01 &&
+                std::abs(position.Y - gridY) <= 0.01 &&
+                std::abs(size.X - segmentWidth) <= 0.01 &&
+                std::abs(size.Y - segmentHeight) <= 0.01;
+            if (!slotMatchesData) return false;
+        }
+        return data->TerrainSegmentsData.Num() == terrain->TerrainSegments.Num();
+    }
+
+    /** Withdraws all target consumers and retires only owned images before a segment tree is replaced. */
+    bool BuildingMapPresentation::RetireNativeSegmentAssociations() noexcept
+    {
+        if (nativeSegments_.empty()) return true;
+        for (std::size_t slotIndex = 0; slotIndex < gridSlots_.size(); ++slotIndex)
+            if (!WithdrawGridSlot(slotIndex)) return false;
+        for (auto& overlap : overlapImages_)
+        {
+            auto* image = static_cast<SDK::UImage*>(overlap.image.Get());
+            if (image)
+            {
+                image->SetVisibility(SDK::ESlateVisibility::Collapsed);
+                image->SetBrushFromMaterial(nullptr);
+                if (image->GetVisibility() != SDK::ESlateVisibility::Collapsed || image->Brush.ResourceObject)
+                    return false;
+                if (image->GetParent() && !image->GetParent()->RemoveChild(image)) return false;
+                if (image->Slot || image->GetParent()) return false;
+            }
+            if (!overlap.image.Reset() || !overlap.outerTree.Reset() || !overlap.canvas.Reset()) return false;
+        }
+        if (!ReleaseNativeSegmentAssociations()) return false;
+        for (auto& slot : gridSlots_) slot.overlapMembers.clear();
+        overlapGeometryReady_ = false;
+        return true;
+    }
+
+    /** Releases each retained native object explicitly so rejected releases stay retryable. */
+    bool BuildingMapPresentation::ReleaseNativeSegmentAssociations() noexcept
+    {
+        for (auto& association : nativeSegments_)
+        {
+            if (!association.terrainImage.Reset() || !association.fogImage.Reset() ||
+                !association.terrainImageSlot.Reset() || !association.fogImageSlot.Reset() ||
+                !association.segmentSlot.Reset() || !association.canvas.Reset() ||
+                !association.segmentTree.Reset() ||
+                !association.segment.Reset()) return false;
+        }
+        nativeSegments_.clear();
+        return true;
+    }
+
+    /** Matches one live segment's actual canvas slot against its native grid record without using array order. */
+    bool BuildingMapPresentation::TryAssociateNativeSegment(
+        SDK::UCrUW_MapMenuTerrainSegment* segment, SDK::UCanvasPanel* terrainCanvas,
+        SDK::UCrMapMenuTerrainData* data, double originX, double originY,
+        double segmentWidth, double segmentHeight,
+        std::vector<NativeSegmentAssociation>& associations)
+    {
+        if (!segment->IsA(SDK::UCrUW_MapMenuTerrainSegment::StaticClass()) ||
+            !segment->ImageTerrain || !segment->ImageFow || !segment->ImageTerrain->Slot ||
+            !segment->ImageFow->Slot ||
+            !segment->ImageTerrain->Slot->IsA(SDK::UCanvasPanelSlot::StaticClass()) ||
+            !segment->ImageFow->Slot->IsA(SDK::UCanvasPanelSlot::StaticClass()) ||
+            segment->ImageTerrain->GetParent() != segment->ImageFow->GetParent() ||
+            !segment->ImageTerrain->GetParent() ||
+            !segment->ImageTerrain->GetParent()->IsA(SDK::UCanvasPanel::StaticClass()) ||
+            segment->GetParent() != terrainCanvas || !segment->Slot ||
+            !segment->Slot->IsA(SDK::UCanvasPanelSlot::StaticClass())) return false;
+        auto* slot = static_cast<SDK::UCanvasPanelSlot*>(segment->Slot);
+        const auto position = slot->GetPosition();
+        const auto size = slot->GetSize();
+        for (std::int32_t i = 0; i < data->TerrainSegmentsData.Num(); ++i)
+        {
+            const auto& record = data->TerrainSegmentsData[i];
+            const double expectedX = record.TerrainSegmentGridIndex.X * segmentWidth;
+            const double expectedY = record.TerrainSegmentGridIndex.Y * segmentHeight;
+            if (std::abs(position.X - expectedX) > 0.01 || std::abs(position.Y - expectedY) > 0.01 ||
+                std::abs(size.X - segmentWidth) > 0.01 || std::abs(size.Y - segmentHeight) > 0.01) continue;
+            return StoreNativeSegmentAssociation(segment, record.TerrainSegmentGridIndex.X,
+                record.TerrainSegmentGridIndex.Y, originX, originY, expectedX, expectedY,
+                segmentWidth, segmentHeight, associations);
+        }
+        return false;
+    }
+
+    /** Retains the matched native segment and stores its world rectangle from the loaded terrain data. */
+    bool BuildingMapPresentation::StoreNativeSegmentAssociation(
+        SDK::UCrUW_MapMenuTerrainSegment* segment, std::int32_t gridX, std::int32_t gridY,
+        double originX, double originY, double expectedX, double expectedY,
+        double segmentWidth, double segmentHeight,
+        std::vector<NativeSegmentAssociation>& associations)
+    {
+        for (const auto& existing : associations)
+            if (existing.gridX == gridX && existing.gridY == gridY) return false;
+        associations.emplace_back();
+        auto& association = associations.back();
+        if (!association.segment.Acquire(segment) ||
+            !association.segmentTree.Acquire(segment->WidgetTree) ||
+            !association.terrainImage.Acquire(segment->ImageTerrain) ||
+            !association.fogImage.Acquire(segment->ImageFow) ||
+            !association.segmentSlot.Acquire(segment->Slot) ||
+            !association.terrainImageSlot.Acquire(segment->ImageTerrain->Slot) ||
+            !association.fogImageSlot.Acquire(segment->ImageFow->Slot) ||
+            !association.canvas.Acquire(segment->ImageTerrain->GetParent())) return false;
+        association.gridX = gridX;
+        association.gridY = gridY;
+        association.bounds = {originX + expectedX * 100.0, originY + expectedY * 100.0,
+            originX + (expectedX + segmentWidth) * 100.0,
+            originY + (expectedY + segmentHeight) * 100.0};
+        return true;
+    }
+
+    /** Rebuilds pooled overlap geometry only when segment associations or physical assignments change. */
+    bool BuildingMapPresentation::ReconcileOverlapGeometry(
+        const std::array<BuildingMapTarget::CompositeTargetInfo,
+            BuildingMapGridPlanner::kPhysicalSlotCount>& targets)
+    {
+        bool changed = !overlapGeometryReady_;
+        for (std::size_t slotIndex = 0; slotIndex < targets.size(); ++slotIndex)
+        {
+            const auto& assignment = targets[slotIndex].Assignment;
+            if (assignment.IsAssigned && assignment.PhysicalSlotIndex != slotIndex) return false;
+            const bool assigned = assignment.IsAssigned;
+            const auto& bounds = assignment.Bounds;
+            if (overlapTargetAssigned_[slotIndex] != assigned ||
+                (assigned && (overlapTargetBounds_[slotIndex].MinX != bounds.MinX ||
+                    overlapTargetBounds_[slotIndex].MinY != bounds.MinY ||
+                    overlapTargetBounds_[slotIndex].MaxX != bounds.MaxX ||
+                    overlapTargetBounds_[slotIndex].MaxY != bounds.MaxY))) changed = true;
+        }
+        if (!changed) return true;
+        for (std::size_t slotIndex = 0; slotIndex < gridSlots_.size(); ++slotIndex)
+            if (gridSlots_[slotIndex].HasPublication && !WithdrawGridSlot(slotIndex)) return false;
+        for (auto& slot : gridSlots_) slot.overlapMembers.clear();
+        for (auto& overlap : overlapImages_)
+        {
+            overlap.active = false;
+            overlap.geometryReady = false;
+            overlap.layoutApplied = false;
+        }
+        std::size_t poolIndex = 0;
+        for (std::size_t slotIndex = 0; slotIndex < targets.size(); ++slotIndex)
+        {
+            const auto& assignment = targets[slotIndex].Assignment;
+            if (assignment.IsAssigned && assignment.PhysicalSlotIndex != slotIndex) return false;
+            if (!assignment.IsAssigned) continue;
+            if (!AddTargetOverlapMembership(slotIndex, assignment, poolIndex)) return false;
+            overlapTargetAssigned_[slotIndex] = true;
+            overlapTargetBounds_[slotIndex] = assignment.Bounds;
+        }
+        for (std::size_t slotIndex = 0; slotIndex < targets.size(); ++slotIndex)
+            if (!targets[slotIndex].Assignment.IsAssigned) overlapTargetAssigned_[slotIndex] = false;
+        overlapGeometryReady_ = true;
+        return true;
+    }
+
+    /** Adds each nonempty half-open intersection to the bounded pool and target membership list. */
+    bool BuildingMapPresentation::AddTargetOverlapMembership(std::size_t slotIndex,
+        const BuildingMapGridPlanner::SlotAssignment& assignment, std::size_t& poolIndex)
+    {
+        for (std::size_t segmentIndex = 0; segmentIndex < nativeSegments_.size(); ++segmentIndex)
+        {
+            const auto& segment = nativeSegments_[segmentIndex];
+            const double minX = (std::max)(static_cast<double>(assignment.Bounds.MinX), segment.bounds.minX);
+            const double minY = (std::max)(static_cast<double>(assignment.Bounds.MinY), segment.bounds.minY);
+            const double maxX = (std::min)(static_cast<double>(assignment.Bounds.MaxX), segment.bounds.maxX);
+            const double maxY = (std::min)(static_cast<double>(assignment.Bounds.MaxY), segment.bounds.maxY);
+            if (maxX <= minX || maxY <= minY) continue;
+            if (poolIndex == overlapImages_.size()) overlapImages_.emplace_back();
+            auto& overlap = overlapImages_[poolIndex];
+            if (overlap.targetSlot != slotIndex || overlap.segmentIndex != segmentIndex)
+                overlap.geometryReady = false;
+            overlap.targetSlot = slotIndex;
+            overlap.segmentIndex = segmentIndex;
+            overlap.active = true;
+            gridSlots_[slotIndex].overlapMembers.push_back(poolIndex++);
+        }
+        return true;
+    }
+
+    /** Creates or reuses a MainMap image and applies the half-open world intersection's crop and anchors. */
+    bool BuildingMapPresentation::ApplyOverlap(OverlapImage& overlap, GridPresentationSlot& targetSlot,
+        const NativeSegmentAssociation& segment, const BuildingMapGridPlanner::WorldBounds& targetBounds,
+        const char*& failureOperation)
+    {
+        failureOperation = nullptr;
+        auto* segmentObject = static_cast<SDK::UCrUW_MapMenuTerrainSegment*>(segment.segment.Get());
+        auto* segmentTree = segmentObject ? segmentObject->WidgetTree : nullptr;
+        auto* canvas = static_cast<SDK::UCanvasPanel*>(segment.canvas.Get());
+        if (!segmentObject || !segmentTree || !canvas || !targetSlot.materialInstance.Get() ||
+            !EnsureOverlapImage(overlap, segmentTree, segment, failureOperation))
+        {
+            if (!failureOperation) failureOperation = "segment-widget-or-target-mid-validation";
+            return false;
+        }
+        if (!CacheOverlapGeometry(overlap, segment, targetBounds))
+        {
+            failureOperation = "overlap-geometry-validation";
+            return false;
+        }
+        auto* image = static_cast<SDK::UImage*>(overlap.image.Get());
+        auto* slot = static_cast<SDK::UCanvasPanelSlot*>(image->Slot);
+        if (!ApplyOverlapLayout(overlap, slot, failureOperation)) return false;
+        auto* material = targetSlot.materialInstance.Get();
+        if (!SetOverlapBrush(overlap, image, material))
+        {
+            failureOperation = "shared-mid-brush-or-uv-writeback";
+            return false;
+        }
+        overlap.layoutApplied = true;
+        image->SetVisibility(SDK::ESlateVisibility::HitTestInvisible);
+        if (image->GetVisibility() != SDK::ESlateVisibility::HitTestInvisible)
+        {
+            failureOperation = "overlap-image-visibility";
+            return false;
+        }
+        failureOperation = nullptr;
+        return true;
+    }
+
+    /** Applies and verifies the complete stretch layout expected for one segment overlap. */
+    bool BuildingMapPresentation::ApplyOverlapLayout(OverlapImage& overlap,
+        SDK::UCanvasPanelSlot* slot, const char*& failureOperation)
+    {
+        if (!overlap.layoutApplied)
+        {
+            slot->SetLayout({{}, {{overlap.anchorMinimumX, overlap.anchorMinimumY},
+                {overlap.anchorMaximumX, overlap.anchorMaximumY}}, {0, 0}});
+            slot->SetZOrder(0);
+            slot->SetAutoSize(false);
+            slot->SetAlignment({0, 0});
+        }
+        const auto anchors = slot->GetAnchors();
+        const auto offsets = slot->GetOffsets();
+        const auto alignment = slot->GetAlignment();
+        if (slot->GetZOrder() == 0 && !slot->GetAutoSize() &&
+            anchors.Minimum.X == overlap.anchorMinimumX &&
+            anchors.Minimum.Y == overlap.anchorMinimumY &&
+            anchors.Maximum.X == overlap.anchorMaximumX &&
+            anchors.Maximum.Y == overlap.anchorMaximumY && offsets.Left == 0 && offsets.Top == 0 &&
+            offsets.Right == 0 && offsets.Bottom == 0 && alignment.X == 0 && alignment.Y == 0)
+            return true;
+        failureOperation = "canvas-slot-layout-writeback";
+        return false;
+    }
+
+    /** Sets a complete white image brush and verifies its shared MID and crop survived SetBrush. */
+    bool BuildingMapPresentation::SetOverlapBrush(
+        OverlapImage& overlap, SDK::UImage* image, SDK::UObject* material)
+    {
+        if (!image || !material || !overlap.geometryReady) return false;
+        SDK::FBox2f uvRegion{};
+        uvRegion.Min = {overlap.uvMinimumX, overlap.uvMinimumY};
+        uvRegion.Max = {overlap.uvMaximumX, overlap.uvMaximumY};
+        uvRegion.bIsValid = true;
+        SDK::FSlateBrush brush = image->Brush;
+        brush.ResourceObject = material;
+        brush.DrawAs = SDK::ESlateBrushDrawType::Image;
+        brush.Tiling = SDK::ESlateBrushTileType::NoTile;
+        brush.Mirroring = SDK::ESlateBrushMirrorType::NoMirror;
+        brush.ImageType = SDK::ESlateBrushImageType::FullColor;
+        brush.ImageSize.X = 1024;
+        brush.ImageSize.Y = 1024;
+        brush.Margin = {};
+        brush.TintColor.SpecifiedColor = {1, 1, 1, 1};
+        brush.TintColor.ColorUseRule = SDK::ESlateColorStylingMode::UseColor_Specified;
+        brush.UVRegion = uvRegion;
+        image->SetBrush(brush);
+        image->SetColorAndOpacity({1, 1, 1, 1});
+        return image->Brush.ResourceObject == material && image->Brush.UVRegion.bIsValid &&
+            image->Brush.UVRegion.Min.X == overlap.uvMinimumX &&
+            image->Brush.UVRegion.Min.Y == overlap.uvMinimumY &&
+            image->Brush.UVRegion.Max.X == overlap.uvMaximumX &&
+            image->Brush.UVRegion.Max.Y == overlap.uvMaximumY;
+    }
+
+    /** Caches normalized segment anchors and composite UV bounds for one half-open intersection. */
+    bool BuildingMapPresentation::CacheOverlapGeometry(OverlapImage& overlap,
+        const NativeSegmentAssociation& segment,
+        const BuildingMapGridPlanner::WorldBounds& targetBounds)
+    {
+        if (overlap.geometryReady) return true;
+        const double minX = (std::max)(static_cast<double>(targetBounds.MinX), segment.bounds.minX);
+        const double minY = (std::max)(static_cast<double>(targetBounds.MinY), segment.bounds.minY);
+        const double maxX = (std::min)(static_cast<double>(targetBounds.MaxX), segment.bounds.maxX);
+        const double maxY = (std::min)(static_cast<double>(targetBounds.MaxY), segment.bounds.maxY);
+        if (maxX <= minX || maxY <= minY || targetBounds.MaxX <= targetBounds.MinX ||
+            targetBounds.MaxY <= targetBounds.MinY) return false;
+        overlap.anchorMinimumX = static_cast<float>((minX - segment.bounds.minX) /
+            (segment.bounds.maxX - segment.bounds.minX));
+        overlap.anchorMinimumY = static_cast<float>((minY - segment.bounds.minY) /
+            (segment.bounds.maxY - segment.bounds.minY));
+        overlap.anchorMaximumX = static_cast<float>((maxX - segment.bounds.minX) /
+            (segment.bounds.maxX - segment.bounds.minX));
+        overlap.anchorMaximumY = static_cast<float>((maxY - segment.bounds.minY) /
+            (segment.bounds.maxY - segment.bounds.minY));
+        overlap.uvMinimumX = static_cast<float>((minX - targetBounds.MinX) /
+            (static_cast<double>(targetBounds.MaxX) - targetBounds.MinX));
+        overlap.uvMinimumY = static_cast<float>((minY - targetBounds.MinY) /
+            (static_cast<double>(targetBounds.MaxY) - targetBounds.MinY));
+        overlap.uvMaximumX = static_cast<float>((maxX - targetBounds.MinX) /
+            (static_cast<double>(targetBounds.MaxX) - targetBounds.MinX));
+        overlap.uvMaximumY = static_cast<float>((maxY - targetBounds.MinY) /
+            (static_cast<double>(targetBounds.MaxY) - targetBounds.MinY));
+        overlap.geometryReady = true;
+        return true;
+    }
+
+    /** Retains a pooled UImage under the segment tree and appends it to the native child canvas. */
+    bool BuildingMapPresentation::EnsureOverlapImage(OverlapImage& overlap, SDK::UWidgetTree* tree,
+        const NativeSegmentAssociation& segment, const char*& failureOperation)
+    {
+        auto* canvasObject = segment.canvas.Get();
+        if (!tree || tree != segment.segmentTree.Get() || !canvasObject ||
+            !canvasObject->IsA(SDK::UCanvasPanel::StaticClass()))
+        {
+            failureOperation = "destination-segment-tree-or-canvas-validation";
+            return false;
+        }
+        auto* canvas = static_cast<SDK::UCanvasPanel*>(canvasObject);
+        if (!overlap.image.Get() && !CreateOverlapImage(overlap, tree, failureOperation)) return false;
+        auto* image = static_cast<SDK::UImage*>(overlap.image.Get());
+        auto* originalOuter = overlap.outerTree.Get();
+        if (!originalOuter && image->Outer && image->Outer->IsA(SDK::UWidgetTree::StaticClass()))
+        {
+            if (!overlap.outerTree.Acquire(image->Outer))
+            {
+                failureOperation = "original-widget-tree-retention";
+                return false;
+            }
+            originalOuter = overlap.outerTree.Get();
+        }
+        if (!originalOuter || image->Outer != originalOuter ||
+            !originalOuter->IsA(SDK::UWidgetTree::StaticClass()))
+        {
+            failureOperation = "mainmap-image-outer-ownership-validation";
+            return false;
+        }
+        return AttachOverlapImage(overlap, image, canvas, failureOperation);
+    }
+
+    /** Creates a pooled image once and retains its MainMap lease independently of segment attachment. */
+    bool BuildingMapPresentation::CreateOverlapImage(OverlapImage& overlap, SDK::UWidgetTree* tree,
+        const char*& failureOperation)
+    {
+        overlap.layoutApplied = false;
+        auto* object = SDK::UGameplayStatics::SpawnObject(SDK::UImage::StaticClass(), tree);
+        if (!object || !object->IsA(SDK::UImage::StaticClass()) || object->Outer != tree ||
+            !overlap.image.Acquire(object))
+        {
+            failureOperation = "mainmap-image-creation-or-retention";
+            return false;
+        }
+        auto* image = static_cast<SDK::UImage*>(object);
+        image->SetColorAndOpacity({1, 1, 1, 1});
+        image->SetVisibility(SDK::ESlateVisibility::Collapsed);
+        return true;
+    }
+
+    /** Attaches a detached pooled image and transfers its retained canvas identity. */
+    bool BuildingMapPresentation::AttachOverlapImage(OverlapImage& overlap, SDK::UImage* image,
+        SDK::UCanvasPanel* canvas, const char*& failureOperation)
+    {
+        if (!MoveOverlapImageToCanvas(overlap, image, canvas, failureOperation)) return false;
+        if (overlap.canvas.Get() != canvas)
+        {
+            if (overlap.canvas && !overlap.canvas.Reset())
+            {
+                failureOperation = "release-previous-canvas-lease";
+                return false;
+            }
+            if (!overlap.canvas.Acquire(canvas))
+            {
+                failureOperation = "retain-destination-canvas";
+                return false;
+            }
+        }
+        if (image->GetParent() == canvas && image->Slot &&
+            image->Slot->IsA(SDK::UCanvasPanelSlot::StaticClass())) return true;
+        failureOperation = "destination-parent-and-slot-validation";
+        return false;
+    }
+
+    /** Moves only a brush-detached image and verifies the new panel and slot identities. */
+    bool BuildingMapPresentation::MoveOverlapImageToCanvas(OverlapImage& overlap, SDK::UImage* image,
+        SDK::UCanvasPanel* canvas, const char*& failureOperation)
+    {
+        if (image->GetParent() == canvas) return true;
+        if (image->Brush.ResourceObject)
+        {
+            failureOperation = "detach-shared-mid-before-reparent";
+            return false;
+        }
+        image->SetVisibility(SDK::ESlateVisibility::Collapsed);
+        if (image->GetVisibility() != SDK::ESlateVisibility::Collapsed)
+        {
+            failureOperation = "hide-before-reparent";
+            return false;
+        }
+        auto* oldParent = image->GetParent();
+        if (oldParent && !oldParent->RemoveChild(image))
+        {
+            failureOperation = "remove-from-previous-panel";
+            return false;
+        }
+        if (image->GetParent() || image->Slot)
+        {
+            failureOperation = "verify-previous-parent-and-slot-cleared";
+            return false;
+        }
+        if (!canvas->AddChildToCanvas(image) || !image->Slot ||
+            !image->Slot->IsA(SDK::UCanvasPanelSlot::StaticClass()))
+        {
+            failureOperation = "attach-to-destination-canvas";
+            return false;
+        }
+        overlap.layoutApplied = false;
+        return true;
+    }
+
+    /** Hides and clears all brush consumers before releasing a target MID. */
+    bool BuildingMapPresentation::WithdrawOverlapImages(std::size_t slotIndex) noexcept
+    {
+        if (slotIndex >= gridSlots_.size()) return false;
+        bool withdrawn = true;
+        for (const auto index : gridSlots_[slotIndex].overlapMembers)
+        {
+            if (index >= overlapImages_.size()) { withdrawn = false; continue; }
+            auto* imageObject = overlapImages_[index].image.Get();
+            if (!imageObject || !imageObject->IsA(SDK::UImage::StaticClass())) continue;
+            auto* image = static_cast<SDK::UImage*>(imageObject);
+            image->SetVisibility(SDK::ESlateVisibility::Collapsed);
+            image->SetBrushFromMaterial(nullptr);
+            if (image->GetVisibility() != SDK::ESlateVisibility::Collapsed || image->Brush.ResourceObject)
+                withdrawn = false;
+        }
+        return withdrawn;
+    }
+
+    /** Removes and releases only MainMap-owned overlap images before native segment destruction. */
+    bool BuildingMapPresentation::RetireOverlapImages() noexcept
+    {
+        bool retired = true;
+        for (auto& overlap : overlapImages_)
+        {
+            auto* image = static_cast<SDK::UImage*>(overlap.image.Get());
+            if (image)
+            {
+                image->SetVisibility(SDK::ESlateVisibility::Collapsed);
+                image->SetBrushFromMaterial(nullptr);
+                if (image->GetVisibility() != SDK::ESlateVisibility::Collapsed) retired = false;
+                auto* parent = image->GetParent();
+                if (parent && !parent->RemoveChild(image)) retired = false;
+                if (image->Brush.ResourceObject || image->GetParent() || image->Slot) retired = false;
+            }
+            if (!retired) continue;
+            if (!overlap.image.Reset() || !overlap.outerTree.Reset() || !overlap.canvas.Reset()) retired = false;
+        }
+        if (retired)
+        {
+            if (!ReleaseNativeSegmentAssociations()) return false;
+            overlapImages_.clear();
+            for (auto& slot : gridSlots_) slot.overlapMembers.clear();
+            overlapGeometryReady_ = false;
+            loggedActiveOverlapCount_ = 0;
+            hasLoggedActiveOverlapCount_ = false;
+            hasLoggedConsumerCount_.fill(false);
+            nativeAssociationFailureLogged_ = false;
+        }
+        return retired;
     }
 
     /** Loads the packaged UI parent once without constructing the retired single-image MID. */
@@ -193,11 +779,11 @@ namespace MainMapBuildingMap
         return true;
     }
 
-    /** Updates one slot and hides it if its source, target, widget, or world mapping is invalid. */
+    /** Updates one slot and hides its consumers if source or target publication checks fail. */
     bool BuildingMapPresentation::UpdateGridSlot(
         const MainMapBuildingLayer::ConsumerContext& context, SDK::UCanvasPanel* canvas,
         SDK::UWidgetTree* tree, const BuildingMapTarget::CompositeTargetInfo& targetInfo,
-        bool sourceSnapshotCurrent, bool geometryChanged)
+        bool sourceSnapshotCurrent)
     {
         const auto& assignment = targetInfo.Assignment;
         const std::size_t slotIndex = assignment.PhysicalSlotIndex;
@@ -206,46 +792,15 @@ namespace MainMapBuildingMap
             return WithdrawGridSlot(slotIndex);
         if (gridSlots_[slotIndex].retiredTarget) ReleaseRetiredGridTarget(slotIndex);
         const bool alreadyPublished = MatchesGridPublication(slotIndex, targetInfo);
-        if (alreadyPublished && !geometryChanged && ValidateGridAttachment(slotIndex, canvas, tree))
-            return MaintainStationaryGridSlot(slotIndex, targetInfo);
-        SDK::FVector2D position{};
-        SDK::FVector2D size{};
-        if (!PrepareGridSlotGeometry(context, canvas, tree, targetInfo, position, size)) return false;
         if (alreadyPublished)
-            return UpdatePublishedGridGeometry(slotIndex, targetInfo, position, size);
-        if (PublishGridSlot(slotIndex, targetInfo, position, size)) return true;
+            return MaintainStationaryGridSlot(slotIndex, targetInfo);
+        if (!EnsureGridSlotWidgets(slotIndex, canvas, tree, context.world, targetInfo)) return false;
+        if (PublishGridSlot(slotIndex, targetInfo)) return true;
 #if defined(_DEBUG)
         ReportGridFailure(slotIndex, assignment, targetInfo, 4, "target-binding-or-publication-failed");
 #endif
-        WithdrawGridSlot(slotIndex);
+        if (!WithdrawGridSlot(slotIndex)) return false;
         return false;
-    }
-
-    /** Ensures the slot attachment and maps world bounds before a new publication or pan/zoom update. */
-    bool BuildingMapPresentation::PrepareGridSlotGeometry(
-        const MainMapBuildingLayer::ConsumerContext& context, SDK::UCanvasPanel* canvas,
-        SDK::UWidgetTree* tree, const BuildingMapTarget::CompositeTargetInfo& targetInfo,
-        SDK::FVector2D& position, SDK::FVector2D& size)
-    {
-        const auto& assignment = targetInfo.Assignment;
-        const std::size_t slotIndex = assignment.PhysicalSlotIndex;
-        if (!EnsureGridSlotWidgets(slotIndex, canvas, tree, context.world, targetInfo))
-        {
-#if defined(_DEBUG)
-            ReportGridFailure(slotIndex, assignment, targetInfo, 1, "widget-attachment-failed");
-#endif
-            WithdrawGridSlot(slotIndex);
-            return false;
-        }
-        if (!MapGridBounds(context, canvas, assignment.Bounds, position, size))
-        {
-#if defined(_DEBUG)
-            ReportGridFailure(slotIndex, assignment, targetInfo, 2, "geometry-map-failed");
-#endif
-            WithdrawGridSlot(slotIndex);
-            return false;
-        }
-        return true;
     }
 
     /** Rebinds only when necessary and retains a clean stationary slot without geometry writes. */
@@ -261,50 +816,15 @@ namespace MainMapBuildingMap
             WithdrawGridSlot(slotIndex);
             return false;
         }
-        return ShowGridImage(slotIndex);
+        return IsGridTargetBound(slotIndex, target);
     }
 
-    /** Applies changed Canvas geometry while keeping the exact content/assignment publication. */
-    bool BuildingMapPresentation::UpdatePublishedGridGeometry(std::size_t slotIndex,
-        const BuildingMapTarget::CompositeTargetInfo& targetInfo,
-        const SDK::FVector2D& position, const SDK::FVector2D& size)
+    /** Caches native parent identities for terrain reconstruction detection. */
+    void BuildingMapPresentation::StoreGridAttachmentIdentity(
+        SDK::UCanvasPanel* canvas, SDK::UWidgetTree* tree) noexcept
     {
-        if (ApplyGridGeometry(slotIndex, position, size)) return true;
-#if defined(_DEBUG)
-        ReportGridFailure(slotIndex, targetInfo.Assignment, targetInfo, 3, "geometry-apply-failed");
-#endif
-        WithdrawGridSlot(slotIndex);
-        return false;
-    }
-
-    /** Detects the live geometry inputs that can change a world-tile image's canvas rectangle. */
-    bool BuildingMapPresentation::HasGridGeometryInputChanged(
-        const MainMapBuildingLayer::ConsumerContext& context,
-        const MainMapBuildingLayer::WorldRect& visibleWorld, SDK::UCanvasPanel* canvas,
-        SDK::UWidgetTree* tree) const noexcept
-    {
-        return !hasGridGeometryInput_ || epoch_ != context.epoch ||
-            visibleWorld.minX != lastGridVisibleWorld_.minX ||
-            visibleWorld.minY != lastGridVisibleWorld_.minY ||
-            visibleWorld.maxX != lastGridVisibleWorld_.maxX ||
-            visibleWorld.maxY != lastGridVisibleWorld_.maxY ||
-            context.originX != lastGridOriginX_ || context.originY != lastGridOriginY_ ||
-            reinterpret_cast<std::uintptr_t>(canvas) != lastGridCanvasIdentity_ ||
-            reinterpret_cast<std::uintptr_t>(tree) != lastGridTreeIdentity_;
-    }
-
-    /** Stores exact successful world and canvas inputs for stationary-frame geometry suppression. */
-    void BuildingMapPresentation::StoreGridGeometryInput(
-        const MainMapBuildingLayer::ConsumerContext& context,
-        const MainMapBuildingLayer::WorldRect& visibleWorld, SDK::UCanvasPanel* canvas,
-        SDK::UWidgetTree* tree) noexcept
-    {
-        lastGridVisibleWorld_ = visibleWorld;
-        lastGridOriginX_ = context.originX;
-        lastGridOriginY_ = context.originY;
         lastGridCanvasIdentity_ = reinterpret_cast<std::uintptr_t>(canvas);
         lastGridTreeIdentity_ = reinterpret_cast<std::uintptr_t>(tree);
-        hasGridGeometryInput_ = true;
     }
 
     /** Creates or validates one stable MID and UImage for a physical composite slot. */
@@ -327,116 +847,7 @@ namespace MainMapBuildingMap
         if (!materialObject || !materialObject->IsA(SDK::UMaterialInstanceDynamic::StaticClass()))
             return false;
         auto* material = static_cast<SDK::UMaterialInstanceDynamic*>(materialObject);
-        if (!slot.image.Get())
-        {
-            auto* object = SDK::UGameplayStatics::SpawnObject(SDK::UImage::StaticClass(), tree);
-            if (!object || !object->IsA(SDK::UImage::StaticClass()) || object->Outer != tree ||
-                !slot.image.Acquire(object)) return false;
-            auto* image = static_cast<SDK::UImage*>(object);
-            image->SetVisibility(SDK::ESlateVisibility::Collapsed);
-            image->SetColorAndOpacity({1, 1, 1, 1});
-        }
-        auto* image = static_cast<SDK::UImage*>(slot.image.Get());
-        if (!material || !image || image->Outer != tree) return false;
-        if (image->Brush.ResourceObject != material) image->SetBrushFromMaterial(material);
-        if (image->Brush.ResourceObject != material) return false;
-#if defined(_DEBUG)
-        const bool wasAttached = image->GetParent() == canvas;
-#endif
-        if (image->GetParent() != canvas)
-        {
-            if (image->GetParent() || image->Slot) return false;
-            auto* canvasSlot = canvas->AddChildToCanvas(image);
-            if (!canvasSlot || !canvasSlot->IsA(SDK::UCanvasPanelSlot::StaticClass()) ||
-                image->Slot != canvasSlot) return false;
-        }
-        slot.WidgetDetached = false;
-        const bool attached = ValidateGridAttachment(slotIndex, canvas, tree);
-#if defined(_DEBUG)
-        if (attached && !wasAttached)
-        {
-            LogGridSlotEvent(slotIndex, targetInfo.Assignment,
-                targetInfo.Assignment.CommittedContentGeneration, targetInfo.Target,
-                "slot-widget-attached");
-        }
-#endif
-        return attached;
-    }
-
-    /** Confirms the expected slot image, tree, canvas parent, CanvasPanelSlot, and MID brush. */
-    bool BuildingMapPresentation::ValidateGridAttachment(std::size_t slotIndex,
-        SDK::UCanvasPanel* canvas, SDK::UWidgetTree* tree) const noexcept
-    {
-        if (slotIndex >= gridSlots_.size() || !canvas || !tree) return false;
-        const auto& slot = gridSlots_[slotIndex];
-        auto* imageObject = slot.image.Get();
-        auto* materialObject = slot.materialInstance.Get();
-        if (!imageObject || !imageObject->IsA(SDK::UImage::StaticClass()) ||
-            !materialObject || !materialObject->IsA(SDK::UMaterialInstanceDynamic::StaticClass())) return false;
-        auto* image = static_cast<SDK::UImage*>(imageObject);
-        if (image->Outer != tree || image->GetParent() != canvas || !image->Slot ||
-            !image->Slot->IsA(SDK::UCanvasPanelSlot::StaticClass()) ||
-            image->Brush.ResourceObject != materialObject) return false;
-        auto* canvasSlot = static_cast<SDK::UCanvasPanelSlot*>(image->Slot);
-        return canvasSlot->Parent == canvas && canvasSlot->Content == image;
-    }
-
-    /** Maps exact signed composite bounds from terrain world centimetres into canvas local coordinates. */
-    bool BuildingMapPresentation::MapGridBounds(
-        const MainMapBuildingLayer::ConsumerContext& context, SDK::UCanvasPanel* canvas,
-        const BuildingMapGridPlanner::WorldBounds& bounds,
-        SDK::FVector2D& position, SDK::FVector2D& size) const
-    {
-        if (!canvas || bounds.MaxX <= bounds.MinX || bounds.MaxY <= bounds.MinY ||
-            !std::isfinite(context.originX) || !std::isfinite(context.originY)) return false;
-        auto* treeObject = canvas->Outer;
-        if (!treeObject || !treeObject->IsA(SDK::UWidgetTree::StaticClass())) return false;
-        auto* tree = static_cast<SDK::UWidgetTree*>(treeObject);
-        auto* terrainObject = tree->Outer;
-        if (!terrainObject || !terrainObject->IsA(SDK::UCrUW_MapMenuTerrain::StaticClass())) return false;
-        auto* terrain = static_cast<SDK::UCrUW_MapMenuTerrain*>(terrainObject);
-        if (terrain->WidgetTree != tree || terrain->CanvasPanelTerrain != canvas) return false;
-        const double localX = (static_cast<double>(bounds.MinX) - context.originX) / 100.0;
-        const double localY = (static_cast<double>(bounds.MinY) - context.originY) / 100.0;
-        const double localWidth = static_cast<double>(bounds.MaxX - bounds.MinX) / 100.0;
-        const double localHeight = static_cast<double>(bounds.MaxY - bounds.MinY) / 100.0;
-        if (!std::isfinite(localX) || !std::isfinite(localY) ||
-            !std::isfinite(localWidth) || !std::isfinite(localHeight) ||
-            localWidth <= 0.0 || localHeight <= 0.0) return false;
-        return MapAbsoluteBoundsToCanvas(canvas->GetPaintSpaceGeometry(),
-            terrain->GetPaintSpaceGeometry(), localX, localY, localWidth, localHeight,
-            position, size);
-    }
-
-    /** Applies explicit top-left position, world-derived size, and established overlay Z order. */
-    bool BuildingMapPresentation::ApplyGridGeometry(std::size_t slotIndex,
-        const SDK::FVector2D& position, const SDK::FVector2D& size)
-    {
-        if (slotIndex >= gridSlots_.size()) return false;
-        auto* imageObject = gridSlots_[slotIndex].image.Get();
-        if (!imageObject || !imageObject->IsA(SDK::UImage::StaticClass())) return false;
-        auto* image = static_cast<SDK::UImage*>(imageObject);
-        if (!image->Slot || !image->Slot->IsA(SDK::UCanvasPanelSlot::StaticClass())) return false;
-        auto* slot = static_cast<SDK::UCanvasPanelSlot*>(image->Slot);
-        const auto currentPosition = slot->GetPosition();
-        const auto currentSize = slot->GetSize();
-        const auto anchors = slot->GetAnchors();
-        const auto alignment = slot->GetAlignment();
-        if (!slot->GetAutoSize() && slot->GetZOrder() == 1 &&
-            anchors.Minimum.X == 0.0f && anchors.Minimum.Y == 0.0f &&
-            anchors.Maximum.X == 0.0f && anchors.Maximum.Y == 0.0f &&
-            alignment.X == 0.0f && alignment.Y == 0.0f &&
-            currentPosition.X == position.X && currentPosition.Y == position.Y &&
-            currentSize.X == size.X && currentSize.Y == size.Y) return true;
-        slot->SetAutoSize(false);
-        slot->SetAnchors({{0, 0}, {0, 0}});
-        slot->SetAlignment({0, 0});
-        slot->SetPosition(position);
-        slot->SetSize(size);
-        slot->SetZOrder(1);
-        return slot->GetPosition().X == position.X && slot->GetPosition().Y == position.Y &&
-            slot->GetSize().X == size.X && slot->GetSize().Y == size.Y &&
-            slot->GetZOrder() == 1 && !slot->GetAutoSize();
+        return material && slot.materialInstance.Get() == material && slot.materialInstance;
     }
 
     /** Binds one composite target to its slot MID and confirms the exact UObject readback. */
@@ -496,25 +907,17 @@ namespace MainMapBuildingMap
         return true;
     }
 
-    /** Collapses one slot's UImage and rejects a visibility change that did not take effect. */
+    /** Hides every overlap image for a physical slot and verifies the full consumer fan-out. */
     bool BuildingMapPresentation::HideGridSlotImage(std::size_t slotIndex) noexcept
     {
-        if (slotIndex >= gridSlots_.size()) return false;
-        auto* imageObject = gridSlots_[slotIndex].image.Get();
-        if (!imageObject) return true;
-        if (!imageObject->IsA(SDK::UImage::StaticClass()))
+        if (WithdrawOverlapImages(slotIndex))
         {
-#if defined(_DEBUG)
-            ReportGridSlotEvent(slotIndex, 9, imageObject, "widget-validation-failed");
-#endif
-            return false;
+            ReportTargetConsumerCount(slotIndex);
+            ReportActiveOverlapCount();
+            return true;
         }
-        auto* image = static_cast<SDK::UImage*>(imageObject);
-        if (image->GetVisibility() != SDK::ESlateVisibility::Collapsed)
-            image->SetVisibility(SDK::ESlateVisibility::Collapsed);
-        if (image->GetVisibility() == SDK::ESlateVisibility::Collapsed) return true;
 #if defined(_DEBUG)
-        ReportGridSlotEvent(slotIndex, 9, imageObject, "widget-hide-failed");
+        ReportGridSlotEvent(slotIndex, 9, gridSlots_[slotIndex].target.Get(), "overlap-image-withdrawal-failed");
 #endif
         return false;
     }
@@ -524,15 +927,6 @@ namespace MainMapBuildingMap
     {
         if (slotIndex >= gridSlots_.size()) return false;
         auto* previousMaterial = gridSlots_[slotIndex].materialInstance.Get();
-        auto* imageObject = gridSlots_[slotIndex].image.Get();
-        if (imageObject && !imageObject->IsA(SDK::UImage::StaticClass()))
-        {
-#if defined(_DEBUG)
-            ReportGridSlotEvent(slotIndex, 9, imageObject, "widget-validation-failed");
-#endif
-            return false;
-        }
-        auto* image = static_cast<SDK::UImage*>(imageObject);
         if (previousMaterial && !previousMaterial->IsA(SDK::UMaterialInstanceDynamic::StaticClass()))
         {
 #if defined(_DEBUG)
@@ -541,7 +935,7 @@ namespace MainMapBuildingMap
 #endif
             return false;
         }
-        if (!ClearGridSlotBrush(slotIndex, image) || !ReleaseGridSlotMaterial(slotIndex)) return false;
+        if (!ClearGridSlotBrush(slotIndex) || !ReleaseGridSlotMaterial(slotIndex)) return false;
 #if defined(_DEBUG)
         if (previousMaterial)
             ReportGridSlotEvent(slotIndex, 0, nullptr, "presentation-mid-detached");
@@ -550,11 +944,9 @@ namespace MainMapBuildingMap
     }
 
     /** Clears a slot image's material resource and reports whether an old target remained exposed. */
-    bool BuildingMapPresentation::ClearGridSlotBrush(std::size_t slotIndex,
-        SDK::UImage* image) noexcept
+    bool BuildingMapPresentation::ClearGridSlotBrush(std::size_t slotIndex) noexcept
     {
         if (slotIndex >= gridSlots_.size()) return false;
-        if (!image || !image->Brush.ResourceObject) return true;
 #if defined(_DEBUG)
         SDK::UObject* previousTarget = nullptr;
         auto* materialObject = gridSlots_[slotIndex].materialInstance.Get();
@@ -569,8 +961,7 @@ namespace MainMapBuildingMap
                 effectiveTarget == slot.retiredTarget.Get()) previousTarget = effectiveTarget;
         }
 #endif
-        image->SetBrushFromMaterial(nullptr);
-        if (!image->Brush.ResourceObject)
+        if (WithdrawOverlapImages(slotIndex))
         {
 #if defined(_DEBUG)
             if (previousTarget)
@@ -580,7 +971,7 @@ namespace MainMapBuildingMap
         }
 #if defined(_DEBUG)
         ReportGridSlotEvent(slotIndex, 10,
-            previousTarget ? previousTarget : image->Brush.ResourceObject,
+            previousTarget ? previousTarget : nullptr,
             previousTarget ? "previous-target-still-effectively-bound" :
                 "presentation-brush-withdrawal-failed");
 #endif
@@ -601,8 +992,7 @@ namespace MainMapBuildingMap
 
     /** Publishes an eligible target after preserving the old lease until its MID no longer uses it. */
     bool BuildingMapPresentation::PublishGridSlot(std::size_t slotIndex,
-        const BuildingMapTarget::CompositeTargetInfo& targetInfo,
-        const SDK::FVector2D& position, const SDK::FVector2D& size)
+        const BuildingMapTarget::CompositeTargetInfo& targetInfo)
     {
         if (slotIndex >= gridSlots_.size() || !targetInfo.Target) return false;
         GridPresentationSlot& slot = gridSlots_[slotIndex];
@@ -625,8 +1015,7 @@ namespace MainMapBuildingMap
             if (!slot.candidateTarget.Acquire(targetInfo.Target)) return false;
             StoreGridTargetIdentity(slot, targetInfo.Assignment, true);
         }
-        if (!ApplyGridGeometry(slotIndex, position, size) ||
-            !BindGridTarget(slotIndex, targetInfo.Target)) return false;
+        if (!BindGridTarget(slotIndex, targetInfo.Target)) return false;
         if (retainedTarget != targetInfo.Target)
         {
             if (slot.target) slot.retiredTarget = std::move(slot.target);
@@ -638,8 +1027,7 @@ namespace MainMapBuildingMap
         {
             StoreGridTargetIdentity(slot, targetInfo.Assignment, false);
         }
-        const bool visible = ShowGridImage(slotIndex);
-        if (!visible) return false;
+        if (!BindGridOverlapConsumers(slotIndex, targetInfo) || !ShowGridImage(slotIndex)) return false;
 #if defined(_DEBUG)
         StoreGridPublication(slotIndex, targetInfo, recycledPhysicalTarget);
 #else
@@ -647,6 +1035,86 @@ namespace MainMapBuildingMap
 #endif
         ReleaseRetiredGridTarget(slotIndex);
         return true;
+    }
+
+    /** Binds every overlap image to this slot MID after its new target publication is committed. */
+    bool BuildingMapPresentation::BindGridOverlapConsumers(std::size_t slotIndex,
+        const BuildingMapTarget::CompositeTargetInfo& targetInfo)
+    {
+        if (slotIndex >= gridSlots_.size()) return false;
+        auto& slot = gridSlots_[slotIndex];
+        for (const auto overlapIndex : slot.overlapMembers)
+        {
+            if (overlapIndex >= overlapImages_.size()) return false;
+            auto& overlap = overlapImages_[overlapIndex];
+            const auto segmentIndex = overlap.segmentIndex;
+            if (segmentIndex >= nativeSegments_.size()) return false;
+            const auto& segment = nativeSegments_[segmentIndex];
+            const char* failureOperation = nullptr;
+            if (!ApplyOverlap(overlap, slot, segment, targetInfo.Assignment.Bounds, failureOperation))
+            {
+                if (overlap.lastFailureSessionEpoch != targetInfo.Assignment.SessionEpoch ||
+                    overlap.lastFailureAssignmentGeneration != targetInfo.Assignment.AssignmentGeneration ||
+                    overlap.lastFailureSegmentX != segment.gridX ||
+                    overlap.lastFailureSegmentY != segment.gridY ||
+                    overlap.lastFailureOperation != failureOperation)
+                {
+                    LOG_ERROR("MainMap Building Map: overlap consumer failed target-slot=%llu segment-grid=(%d,%d) assignment=%llu operation=%s",
+                        static_cast<unsigned long long>(slotIndex), segment.gridX, segment.gridY,
+                        static_cast<unsigned long long>(targetInfo.Assignment.AssignmentGeneration),
+                        failureOperation ? failureOperation : "unknown-overlap-operation");
+                    overlap.lastFailureSessionEpoch = targetInfo.Assignment.SessionEpoch;
+                    overlap.lastFailureAssignmentGeneration = targetInfo.Assignment.AssignmentGeneration;
+                    overlap.lastFailureSegmentX = segment.gridX;
+                    overlap.lastFailureSegmentY = segment.gridY;
+                    overlap.lastFailureOperation = failureOperation;
+                }
+                return false;
+            }
+            overlap.lastFailureOperation = nullptr;
+        }
+        return !slot.overlapMembers.empty();
+    }
+
+    /** Logs the visible MainMap overlap image count only when it changes. */
+    void BuildingMapPresentation::ReportActiveOverlapCount() noexcept
+    {
+        std::size_t activeCount = 0;
+        for (const auto& overlap : overlapImages_)
+        {
+            auto* imageObject = overlap.image.Get();
+            if (!overlap.active || !imageObject || !imageObject->IsA(SDK::UImage::StaticClass())) continue;
+            auto* image = static_cast<SDK::UImage*>(imageObject);
+            if (image->Brush.ResourceObject && image->GetVisibility() == SDK::ESlateVisibility::HitTestInvisible)
+                ++activeCount;
+        }
+        if (hasLoggedActiveOverlapCount_ && loggedActiveOverlapCount_ == activeCount) return;
+        LOG_INFO("MainMap Building Map: active overlap images=%llu",
+            static_cast<unsigned long long>(activeCount));
+        loggedActiveOverlapCount_ = activeCount;
+        hasLoggedActiveOverlapCount_ = true;
+    }
+
+    /** Counts images that visibly reference one physical slot's shared presentation MID. */
+    void BuildingMapPresentation::ReportTargetConsumerCount(std::size_t slotIndex) noexcept
+    {
+        if (slotIndex >= gridSlots_.size()) return;
+        std::size_t consumerCount = 0;
+        auto* material = gridSlots_[slotIndex].materialInstance.Get();
+        for (const auto index : gridSlots_[slotIndex].overlapMembers)
+        {
+            if (index >= overlapImages_.size()) continue;
+            auto* imageObject = overlapImages_[index].image.Get();
+            if (!imageObject || !imageObject->IsA(SDK::UImage::StaticClass())) continue;
+            auto* image = static_cast<SDK::UImage*>(imageObject);
+            if (material && image->Brush.ResourceObject == material &&
+                image->GetVisibility() == SDK::ESlateVisibility::HitTestInvisible) ++consumerCount;
+        }
+        if (hasLoggedConsumerCount_[slotIndex] && loggedConsumerCounts_[slotIndex] == consumerCount) return;
+        LOG_INFO("MainMap Building Map: target slot=%llu attached consumers=%llu",
+            static_cast<unsigned long long>(slotIndex), static_cast<unsigned long long>(consumerCount));
+        loggedConsumerCounts_[slotIndex] = consumerCount;
+        hasLoggedConsumerCount_[slotIndex] = true;
     }
 
     /** Releases every unbound target lease for a slot without losing rejected ownership records. */
@@ -704,20 +1172,11 @@ namespace MainMapBuildingMap
     }
 
     /** Detaches one slot and releases its resources only after every UI reference is cleared. */
-    bool BuildingMapPresentation::RetireGridSlot(std::size_t slotIndex,
-        bool widgetDestructionStarted) noexcept
+    bool BuildingMapPresentation::RetireGridSlot(std::size_t slotIndex) noexcept
     {
         if (slotIndex >= gridSlots_.size()) return false;
         GridPresentationSlot& slot = gridSlots_[slotIndex];
-        if (!slot.WidgetDetached && widgetDestructionStarted && slot.image.Get())
-        {
-#if defined(_DEBUG)
-            ReportGridSlotEvent(slotIndex, 12, slot.image.Get(), "presentation-retirement-deferred");
-#endif
-            return false;
-        }
         if (!WithdrawGridSlot(slotIndex)) return false;
-        if (!DetachGridSlotWidget(slotIndex)) return false;
         if (slot.materialInstance && !slot.materialInstance.Reset())
         {
 #if defined(_DEBUG)
@@ -726,62 +1185,20 @@ namespace MainMapBuildingMap
             return false;
         }
         if (!ReleaseGridSlotTargets(slotIndex)) return false;
-        if (slot.image && !slot.image.Reset())
-        {
-#if defined(_DEBUG)
-            ReportGridSlotEvent(slotIndex, 13, slot.image.Get(), "image-lease-release-deferred");
-#endif
-            return false;
-        }
-        slot.WidgetDetached = false;
-        return true;
-    }
-
-    /** Removes one image and its brush reference before the slot MID and texture leases retire. */
-    bool BuildingMapPresentation::DetachGridSlotWidget(std::size_t slotIndex) noexcept
-    {
-        if (slotIndex >= gridSlots_.size()) return false;
-        GridPresentationSlot& slot = gridSlots_[slotIndex];
-        auto* imageObject = slot.image.Get();
-        if (imageObject && !imageObject->IsA(SDK::UImage::StaticClass()))
-        {
-#if defined(_DEBUG)
-            ReportGridSlotEvent(slotIndex, 12, imageObject, "presentation-image-validation-failed");
-#endif
-            return false;
-        }
-        if (!slot.WidgetDetached && imageObject && imageObject->IsA(SDK::UImage::StaticClass()))
-        {
-            auto* image = static_cast<SDK::UImage*>(imageObject);
-            image->RemoveFromParent();
-            if (image->GetParent() || image->Slot)
-            {
-#if defined(_DEBUG)
-                ReportGridSlotEvent(slotIndex, 12, image, "presentation-detach-failed");
-#endif
-                return false;
-            }
-            image->SetBrushFromMaterial(nullptr);
-            if (image->Brush.ResourceObject)
-            {
-#if defined(_DEBUG)
-                ReportGridSlotEvent(slotIndex, 12, image->Brush.ResourceObject,
-                    "presentation-brush-withdrawal-failed");
-#endif
-                return false;
-            }
-            slot.WidgetDetached = true;
-        }
         return true;
     }
 
     /** Retires every presentation slot before the shared parent material can be released. */
-    bool BuildingMapPresentation::RetireGridSlots(bool widgetDestructionStarted) noexcept
+    bool BuildingMapPresentation::RetireGridSlots() noexcept
     {
+        bool withdrawn = true;
+        for (std::size_t slotIndex = 0; slotIndex < gridSlots_.size(); ++slotIndex)
+            if (!WithdrawGridSlot(slotIndex)) withdrawn = false;
+        if (!withdrawn || !RetireOverlapImages()) return false;
         bool retired = true;
         for (std::size_t slotIndex = 0; slotIndex < gridSlots_.size(); ++slotIndex)
         {
-            if (!RetireGridSlot(slotIndex, widgetDestructionStarted)) retired = false;
+            if (!RetireGridSlot(slotIndex)) retired = false;
         }
         return retired;
     }
@@ -865,13 +1282,20 @@ namespace MainMapBuildingMap
     /** Sets HitTestInvisible on a slot image and confirms Slate accepted the visible state. */
     bool BuildingMapPresentation::ShowGridImage(std::size_t slotIndex) noexcept
     {
-        if (slotIndex >= gridSlots_.size()) return false;
-        auto* imageObject = gridSlots_[slotIndex].image.Get();
-        if (!imageObject || !imageObject->IsA(SDK::UImage::StaticClass())) return false;
-        auto* image = static_cast<SDK::UImage*>(imageObject);
-        if (image->GetVisibility() != SDK::ESlateVisibility::HitTestInvisible)
+        if (slotIndex >= gridSlots_.size() || gridSlots_[slotIndex].overlapMembers.empty()) return false;
+        for (const auto index : gridSlots_[slotIndex].overlapMembers)
+        {
+            if (index >= overlapImages_.size()) return false;
+            auto* imageObject = overlapImages_[index].image.Get();
+            if (!imageObject || !imageObject->IsA(SDK::UImage::StaticClass())) return false;
+            auto* image = static_cast<SDK::UImage*>(imageObject);
+            if (image->Brush.ResourceObject != gridSlots_[slotIndex].materialInstance.Get()) return false;
             image->SetVisibility(SDK::ESlateVisibility::HitTestInvisible);
-        return image->GetVisibility() == SDK::ESlateVisibility::HitTestInvisible;
+            if (image->GetVisibility() != SDK::ESlateVisibility::HitTestInvisible) return false;
+        }
+        ReportTargetConsumerCount(slotIndex);
+        ReportActiveOverlapCount();
+        return true;
     }
 
     /** Stores the exact published assignment and content identity after the slot becomes visible. */
@@ -1469,7 +1893,7 @@ namespace MainMapBuildingMap
             LogRetirementFailure("native-admission-or-game-thread");
             return false;
         }
-        if (!RetireGridSlots(widgetDestructionStarted))
+        if (!RetireGridSlots())
         {
             return false;
         }
@@ -1533,7 +1957,6 @@ namespace MainMapBuildingMap
         widgetDetached_ = false;
         materialInstanceDetached_ = false;
         retirementFailureStage_ = nullptr;
-        hasGridGeometryInput_ = false;
         lastGridCanvasIdentity_ = 0;
         lastGridTreeIdentity_ = 0;
     }
