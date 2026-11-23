@@ -100,6 +100,7 @@
     <ClInclude Include="Map\BuildingMapGridPlanner.h" />
     <ClInclude Include="Map\BuildingMapTarget.h" />
     <ClInclude Include="Map\BuildingMapPresentation.h" />
+    <ClInclude Include="Map\FogOfWarPresentation.h" />
     <ClInclude Include="Map\MaterialProof.h" />
     <ClInclude Include="Map\RenderingProof.h" />
     <ClInclude Include="Native\Fingerprints.h" />
@@ -132,6 +133,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)' != 'Client Debug' And '$(Configuration)' != 'Client Release'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="Map\BuildingMapPresentation.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)' != 'Client Debug' And '$(Configuration)' != 'Client Release'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="Map\FogOfWarPresentation.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)' != 'Client Debug' And '$(Configuration)' != 'Client Release'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="$(StarRuptureSDKSourceDir)CommonUI_functions.cpp">

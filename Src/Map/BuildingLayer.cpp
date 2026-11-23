@@ -6,6 +6,7 @@
 #include "BuildingMapRemote.h"
 #include "BuildingMapTarget.h"
 #include "BuildingMapPresentation.h"
+#include "FogOfWarPresentation.h"
 #include "RenderingProof.h"
 #include "Native/NativeApi.h"
 #include "ChimeraUI_classes.hpp"
@@ -45,6 +46,7 @@ namespace
         uint64_t epoch=0;
         bool closing=false;
         bool terrainDestructionStarted=false;
+        bool fowPresentationEnabled=false;
         bool providerWorldValid=false;
         bool viewportScaleObserved=false;
         bool zoomSettlementPending=false;
@@ -276,6 +278,10 @@ namespace
         {
             LogSessionGate(session.diagnosticCleanupDeferrals,0,"terrain session cleanup deferred",
                 &session,"native-admission-closed");
+            return false;
+        }
+        if (!MainMapBuildingMap::FogOfWarPresentation::RestoreShared(session.terrainDestructionStarted))
+        {
             return false;
         }
         if (!MainMapBuildingMap::BuildingMapPresentation::RetireShared(session.terrainDestructionStarted))
@@ -556,6 +562,7 @@ namespace MainMapBuildingLayer
             Reject("terrain/world/canvas retention");
             return;
         }
+        session.fowPresentationEnabled = MainMapBuildingMap::FogOfWarPresentation::AttachShared(terrain);
         // BCT1 owns its per-tile image and material leases. This service owns
         // only the terrain session and its geometry/admission context.
     }
@@ -602,6 +609,15 @@ namespace MainMapBuildingLayer
             LogSessionGate(session.diagnosticTickBlocks,9,"terrain Tick blocked",&session,"session-terrain-or-canvas-invalid");
             Close("session terrain/canvas changed");
             return;
+        }
+        if (session.fowPresentationEnabled)
+        {
+            const auto result = MainMapBuildingMap::FogOfWarPresentation::MaintainShared(terrain,canvas);
+            if (result == MainMapBuildingMap::FogOfWarMaintenanceResult::Failed)
+            {
+                session.fowPresentationEnabled = false;
+                MainMapBuildingMap::FogOfWarPresentation::RestoreShared();
+            }
         }
         MainMapBuildingLayer::WorldRect visibleWorld{};
         if (!TryGetVisibleWorldRect(visibleWorld))
