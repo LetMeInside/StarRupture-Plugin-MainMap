@@ -1,6 +1,7 @@
 // Implements MainMap's consumer-driven access to MiniMap's completed Section
 // images while keeping provider objects and scheduling entirely in MiniMap.
 #include "BuildingMapRemote.h"
+#include "BuildingMapTimingDiagnostics.h"
 
 #include "Native/NativeApi.h"
 #include "plugin_helpers.h"
@@ -9,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <limits>
 
 namespace MainMapBuildingMap
@@ -56,7 +58,14 @@ namespace MainMapBuildingMap
     {
         state = {};
         state.StructSize = sizeof(state);
-        return table_.QueryState(collector_, viewport_, &state);
+#if defined(_DEBUG)
+        const auto started = std::chrono::steady_clock::now();
+#endif
+        const auto result = table_.QueryState(collector_, viewport_, &state);
+#if defined(_DEBUG)
+        BuildingMapTimingDiagnostics::Record("building-map.provider-state-abi", started);
+#endif
+        return result;
     }
 
     /** Creates the provider-owned collector and opens an ordinary viewport when absent. */
@@ -65,7 +74,13 @@ namespace MainMapBuildingMap
     {
         if (collector_ == 0)
         {
+#if defined(_DEBUG)
+            const auto createStarted = std::chrono::steady_clock::now();
+#endif
             const auto result = table_.CreateCollector(&collector_);
+#if defined(_DEBUG)
+            BuildingMapTimingDiagnostics::Record("building-map.collector-create-abi", createStarted);
+#endif
             if (result != BUILDING_MAP_ABI_OK || collector_ == 0)
             {
                 availability_ = result == BUILDING_MAP_ABI_NO_SESSION
@@ -80,8 +95,14 @@ namespace MainMapBuildingMap
             return true;
         }
 
+#if defined(_DEBUG)
+        const auto openStarted = std::chrono::steady_clock::now();
+#endif
         const auto result = table_.OpenViewport(collector_, xMapUnits, yMapUnits,
             widthMapUnits, heightMapUnits, &viewport_);
+#if defined(_DEBUG)
+        BuildingMapTimingDiagnostics::Record("building-map.viewport-open-abi", openStarted);
+#endif
         if (result == BUILDING_MAP_ABI_OK && viewport_ != 0)
         {
             opened = true;
@@ -137,8 +158,14 @@ namespace MainMapBuildingMap
         double widthMapUnits, double heightMapUnits, bool& updateAccepted)
     {
         updateAccepted = false;
+#if defined(_DEBUG)
+        const auto updateStarted = std::chrono::steady_clock::now();
+#endif
         auto result = table_.UpdateViewport(viewport_, xMapUnits, yMapUnits,
             widthMapUnits, heightMapUnits);
+#if defined(_DEBUG)
+        BuildingMapTimingDiagnostics::Record("building-map.provider-update-abi", updateStarted);
+#endif
         if (result != BUILDING_MAP_ABI_OK)
         {
             availability_ = Availability::Failure;
@@ -180,7 +207,14 @@ namespace MainMapBuildingMap
         availability_ = Availability::Active;
         try
         {
-            return PollVisibleImages(state.VisibleGridWidth, state.VisibleGridHeight);
+#if defined(_DEBUG)
+            const auto pollStarted = std::chrono::steady_clock::now();
+#endif
+            const bool pollCompleted = PollVisibleImages(state.VisibleGridWidth, state.VisibleGridHeight);
+#if defined(_DEBUG)
+            BuildingMapTimingDiagnostics::Record("building-map.image-poll", pollStarted);
+#endif
+            return pollCompleted;
         }
         catch (...)
         {
@@ -234,7 +268,14 @@ namespace MainMapBuildingMap
     {
         metadata = {};
         metadata.StructSize = sizeof(metadata);
-        return table_.CopySectionImage(viewport_, localX, localY, &metadata, nullptr, 0);
+#if defined(_DEBUG)
+        const auto queryStarted = std::chrono::steady_clock::now();
+#endif
+        const auto result = table_.CopySectionImage(viewport_, localX, localY, &metadata, nullptr, 0);
+#if defined(_DEBUG)
+        BuildingMapTimingDiagnostics::Record("building-map.image-metadata-abi", queryStarted);
+#endif
+        return result;
     }
 
     /** Copies a reported image and retries once when the provider's required size changes. */
@@ -253,8 +294,14 @@ namespace MainMapBuildingMap
         {
             metadata = {};
             metadata.StructSize = sizeof(metadata);
+#if defined(_DEBUG)
+            const auto copyStarted = std::chrono::steady_clock::now();
+#endif
             result = table_.CopySectionImage(viewport_, localX, localY, &metadata,
                 copyBuffer_.data(), copyBuffer_.size());
+#if defined(_DEBUG)
+            BuildingMapTimingDiagnostics::Record("building-map.image-copy-abi", copyStarted);
+#endif
             if ((result == BUILDING_MAP_ABI_OK || result == BUILDING_MAP_ABI_BUFFER_TOO_SMALL) &&
                 (metadata.GridX != expectedGridX || metadata.GridY != expectedGridY))
             {

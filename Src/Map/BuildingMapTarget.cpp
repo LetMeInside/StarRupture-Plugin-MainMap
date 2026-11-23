@@ -1,5 +1,6 @@
 // Retains MainMap's single-Section path and prepares internal coordinate-keyed composite GPU state.
 #include "BuildingMapTarget.h"
+#include "BuildingMapTimingDiagnostics.h"
 
 #include "BuildingLayer.h"
 #include "MaterialProof.h"
@@ -7,6 +8,7 @@
 #include "plugin_helpers.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <new>
@@ -232,10 +234,9 @@ namespace MainMapBuildingMap
         return true;
     }
 
-    /** Validates the byte contract and writes a lossless RGBA PNG into memory. */
-    bool BuildingMapTarget::EncodePng(const SectionImage& image, std::vector<uint8_t>& pngBytes)
+    /** Validates the copied RGBA8 image layout and the native view's signed byte-count limit. */
+    bool BuildingMapTarget::ValidateRgba8Image(const SectionImage& image) noexcept
     {
-        pngBytes.clear();
         if (image.Width == 0 || image.Height == 0 || image.Revision == 0 ||
             image.Width > static_cast<uint32_t>((std::numeric_limits<int32_t>::max)()) ||
             image.Height > static_cast<uint32_t>((std::numeric_limits<int32_t>::max)()) ||
@@ -245,157 +246,46 @@ namespace MainMapBuildingMap
         }
         const uint64_t expectedStride = uint64_t(image.Width) * 4;
         if (image.RowStride != expectedStride ||
-            expectedStride > (std::numeric_limits<uint64_t>::max)() / image.Height ||
-            image.ByteCount != expectedStride * image.Height ||
-            image.Pixels.size() != image.ByteCount)
+            image.Height > (std::numeric_limits<uint64_t>::max)() / expectedStride)
         {
             return false;
         }
-
-        std::vector<uint8_t> deflateBytes;
-        try
-        {
-            if (!EncodeDeflate(image, deflateBytes) ||
-                deflateBytes.size() > (std::numeric_limits<uint32_t>::max)() ||
-                deflateBytes.size() >
-                    static_cast<size_t>((std::numeric_limits<int32_t>::max)()) - 57)
-            {
-                return false;
-            }
-            pngBytes = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
-            std::vector<uint8_t> header;
-            AppendBigEndian32(image.Width, header);
-            AppendBigEndian32(image.Height, header);
-            header.insert(header.end(), {8, 6, 0, 0, 0});
-            AppendPngChunk("IHDR", header.data(), header.size(), pngBytes);
-            AppendPngChunk("IDAT", deflateBytes.data(), deflateBytes.size(), pngBytes);
-            AppendPngChunk("IEND", nullptr, 0, pngBytes);
-        }
-        catch (...)
-        {
-            pngBytes.clear();
-            return false;
-        }
-        return pngBytes.size() <= static_cast<size_t>((std::numeric_limits<int32_t>::max)());
+        const uint64_t expectedByteCount = expectedStride * image.Height;
+        return image.ByteCount == expectedByteCount && image.Pixels.size() == expectedByteCount &&
+            expectedByteCount <= static_cast<uint64_t>((std::numeric_limits<int64_t>::max)());
     }
 
-    /** Builds PNG scanlines and a standards-compliant stored DEFLATE stream. */
-    bool BuildingMapTarget::EncodeDeflate(const SectionImage& image, std::vector<uint8_t>& deflateBytes)
-    {
-        if (image.ByteCount > (std::numeric_limits<size_t>::max)() - image.Height)
-        {
-            return false;
-        }
-        const size_t rawSize = static_cast<size_t>(image.ByteCount + image.Height);
-        if (rawSize > (std::numeric_limits<uint32_t>::max)())
-        {
-            return false;
-        }
-        std::vector<uint8_t> scanlines;
-        scanlines.reserve(rawSize);
-        const size_t stride = static_cast<size_t>(image.RowStride);
-        for (uint32_t row = 0; row < image.Height; ++row)
-        {
-            scanlines.push_back(0);
-            const size_t rowStart = size_t(row) * stride;
-            scanlines.insert(scanlines.end(), image.Pixels.begin() + rowStart,
-                image.Pixels.begin() + rowStart + stride);
-        }
-
-        deflateBytes.clear();
-        deflateBytes.reserve(rawSize + 6 + (rawSize / 65535 + 1) * 5);
-        deflateBytes.push_back(0x78);
-        deflateBytes.push_back(0x01);
-        for (size_t offset = 0; offset < rawSize;)
-        {
-            const size_t blockSize = (std::min)(size_t{65535}, rawSize - offset);
-            const bool finalBlock = offset + blockSize == rawSize;
-            deflateBytes.push_back(finalBlock ? 1 : 0);
-            deflateBytes.push_back(static_cast<uint8_t>(blockSize));
-            deflateBytes.push_back(static_cast<uint8_t>(blockSize >> 8));
-            const uint16_t inverseSize = static_cast<uint16_t>(~static_cast<uint16_t>(blockSize));
-            deflateBytes.push_back(static_cast<uint8_t>(inverseSize));
-            deflateBytes.push_back(static_cast<uint8_t>(inverseSize >> 8));
-            deflateBytes.insert(deflateBytes.end(), scanlines.begin() + offset,
-                scanlines.begin() + offset + blockSize);
-            offset += blockSize;
-        }
-        AppendAdler32(scanlines, deflateBytes);
-        return true;
-    }
-
-    /** Adds one PNG chunk and its CRC without writing any data to disk. */
-    void BuildingMapTarget::AppendPngChunk(const char type[4], const uint8_t* payload,
-        size_t payloadSize, std::vector<uint8_t>& pngBytes)
-    {
-        AppendBigEndian32(static_cast<uint32_t>(payloadSize), pngBytes);
-        const size_t crcStart = pngBytes.size();
-        pngBytes.insert(pngBytes.end(), type, type + 4);
-        if (payloadSize != 0)
-        {
-            pngBytes.insert(pngBytes.end(), payload, payload + payloadSize);
-        }
-        uint32_t crc = 0xFFFFFFFF;
-        for (size_t index = crcStart; index < pngBytes.size(); ++index)
-        {
-            crc = UpdateCrc32(crc, pngBytes[index]);
-        }
-        AppendBigEndian32(crc ^ 0xFFFFFFFF, pngBytes);
-    }
-
-    /** Applies the PNG CRC-32 polynomial to one input byte. */
-    uint32_t BuildingMapTarget::UpdateCrc32(uint32_t crc, uint8_t value) noexcept
-    {
-        crc ^= value;
-        for (unsigned bit = 0; bit < 8; ++bit)
-        {
-            crc = (crc & 1) ? (crc >> 1) ^ 0xEDB88320 : crc >> 1;
-        }
-        return crc;
-    }
-
-    /** Appends one unsigned integer in PNG network byte order. */
-    void BuildingMapTarget::AppendBigEndian32(uint32_t value, std::vector<uint8_t>& bytes)
-    {
-        bytes.push_back(static_cast<uint8_t>(value >> 24));
-        bytes.push_back(static_cast<uint8_t>(value >> 16));
-        bytes.push_back(static_cast<uint8_t>(value >> 8));
-        bytes.push_back(static_cast<uint8_t>(value));
-    }
-
-    /** Appends the Adler-32 trailer required by a zlib-wrapped DEFLATE stream. */
-    void BuildingMapTarget::AppendAdler32(const std::vector<uint8_t>& bytes,
-        std::vector<uint8_t>& deflateBytes)
-    {
-        uint32_t first = 1;
-        uint32_t second = 0;
-        for (const uint8_t value : bytes)
-        {
-            first = (first + value) % 65521;
-            second = (second + first) % 65521;
-        }
-        const uint32_t adler = (second << 16) | first;
-        AppendBigEndian32(adler, deflateBytes);
-    }
-
-    /** Imports source bytes and validates texture class, dimensions, and sRGB state. */
+    /** Creates a transient RGBA8 source texture and validates its retained UObject properties. */
     bool BuildingMapTarget::CreateInputTexture(SDK::UObject* worldContext,
         const SectionImage& image, ResourceSet& resources)
     {
-        std::vector<uint8_t> pngBytes;
-        if (!EncodePng(image, pngBytes))
+        if (!worldContext || !ValidateRgba8Image(image))
         {
             return false;
         }
-        UC::TArray<UC::uint8> importBuffer(pngBytes.data(),
-            static_cast<UC::int32>(pngBytes.size()), static_cast<UC::int32>(pngBytes.size()));
-        auto* imported = SDK::UKismetRenderingLibrary::ImportBufferAsTexture2D(worldContext, importBuffer);
-        if (!imported || !imported->IsA(SDK::UTexture2D::StaticClass()) ||
-            !resources.InputTexture.Acquire(imported))
+#if defined(_DEBUG)
+        const auto creationStarted = std::chrono::steady_clock::now();
+#endif
+        auto* created = MainMapNative::NativeApi::CreateTransientTexture(static_cast<int32_t>(image.Width),
+            static_cast<int32_t>(image.Height), SDK::EPixelFormat::PF_R8G8B8A8,
+            image.Pixels.data(), static_cast<int64_t>(image.ByteCount));
+#if defined(_DEBUG)
+        const double creationMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - creationStarted).count();
+        gridDiagnosticBatch_.DirectCreationTotalMs += creationMs;
+        gridDiagnosticBatch_.DirectCreationLongestMs =
+            (std::max)(gridDiagnosticBatch_.DirectCreationLongestMs, creationMs);
+        if (created)
+        {
+            ++gridDiagnosticBatch_.CreatedSourceTextures;
+        }
+#endif
+        if (!created || !created->IsA(SDK::UTexture2D::StaticClass()) ||
+            !resources.InputTexture.Acquire(created))
         {
             return false;
         }
-        auto* texture = static_cast<SDK::UTexture2D*>(imported);
+        auto* texture = static_cast<SDK::UTexture2D*>(created);
         return texture->Blueprint_GetSizeX() == static_cast<UC::int32>(image.Width) &&
             texture->Blueprint_GetSizeY() == static_cast<UC::int32>(image.Height) && texture->SRGB != 0;
     }
@@ -704,6 +594,12 @@ namespace MainMapBuildingMap
         const BuildingMapRemote& remote)
     {
 #if defined(_DEBUG)
+        auto timingContext = BuildingMapTimingDiagnostics::GetContext();
+        timingContext.Sources = compositeSources_.size();
+        timingContext.Imports = gridDiagnosticBatch_.ImportedSources;
+        timingContext.Composites = gridDiagnosticBatch_.ComposedSlots;
+        BuildingMapTimingDiagnostics::SetContext(timingContext);
+        BuildingMapTimingDiagnostics::Scope compositeTiming("building-map.composite-slot");
         currentCompositeFailureKind_ = 0;
         currentCompositeDrawSubmissions_ = 0;
 #endif
@@ -1074,6 +970,9 @@ namespace MainMapBuildingMap
     {
 #if defined(_DEBUG)
         gridDiagnosticBatch_ = {};
+        BuildingMapTimingDiagnostics::PreparationScope preparationTiming(
+            "building-map.composite-preparation", gridDiagnosticBatch_.CreatedSourceTextures,
+            gridDiagnosticBatch_.DirectCreationTotalMs, gridDiagnosticBatch_.DirectCreationLongestMs);
 #endif
         if (!MainMapNative::CanOperate() || !MainMapNative::IsGameThread() ||
             !worldContext || !sessionEpoch) return;
@@ -1492,7 +1391,7 @@ namespace MainMapBuildingMap
         ClearCompositeSlotAssignment(resources);
     }
 
-    /** Reuses an exact accepted texture or imports and safely adopts a changed source revision. */
+    /** Reuses an exact accepted texture or creates and safely adopts a changed source revision. */
     bool BuildingMapTarget::SynchronizeSourceTexture(SDK::UObject* worldContext,
         const CompositeSectionSource& source, const SectionImage& image) noexcept
     {
@@ -1641,7 +1540,7 @@ namespace MainMapBuildingMap
         return AdoptSourceTextureCandidate(source, candidate, entry);
     }
 
-    /** Imports the image only after the parent material lease has been admitted successfully. */
+    /** Creates the source texture only after the parent material lease has been admitted successfully. */
     bool BuildingMapTarget::BuildSourceTextureCandidate(SDK::UObject* worldContext,
         const CompositeSectionSource& source, const SectionImage& image,
         SourceTextureEntry& entry, ResourceSet& candidate,

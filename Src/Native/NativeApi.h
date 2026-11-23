@@ -1,14 +1,27 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 struct IPluginSelf;
 
 namespace SDK { class UObject; }
+namespace SDK { class UTexture2D; }
+namespace SDK { class FName; }
 namespace SDK { struct FGeometry; }
+namespace SDK { enum class EPixelFormat : uint8_t; }
 namespace MainMapFingerprints { struct ResolvedAddresses; }
 
 namespace MainMapNative
 {
+    /** Provides typed access to mandatory resolved engine functions under MainMap admission. */
+    class NativeApi final
+    {
+    public:
+        /** Creates a transient texture from width/height, format, and borrowed pixel bytes; returns null when admission or creation fails. The engine copies the bytes before returning. */
+        static SDK::UTexture2D* CreateTransientTexture(int32_t width, int32_t height,
+            SDK::EPixelFormat format, const uint8_t* pixels, int64_t byteCount) noexcept;
+    };
+
     bool Initialize(const MainMapFingerprints::ResolvedAddresses& addresses);
     bool Available() noexcept;
     bool IsGameThread() noexcept;

@@ -189,8 +189,21 @@ namespace MainMapFingerprints
             "48 39 04 D1 75 0A 33 D2 48 8B CF E8 ?? ?? ?? ??";
         addresses.mapMenuNativeOnDeactivated = scanner->Resolve(self, &mapMenu);
 
+        // This required function-start scan resolves the engine's initial-data overload.
+        PluginScanRequest textureCreate = PLUGIN_SCAN_REQUEST_INIT;
+        textureCreate.kind = PLUGIN_SCAN_FUNCTION_START;
+        textureCreate.hookName = "MainMap::UTexture2D::CreateTransient";
+        textureCreate.pattern =
+            "48 89 5C 24 18 55 56 57 41 54 41 55 41 56 41 57 "
+            "48 8D 6C 24 A0 48 81 EC 60 01 00 00 "
+            "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 45 50 "
+            "4C 8B AD C0 00 00 00 44 8B E1 41 0F B6 C0 "
+            "44 8B FA 88 44 24 50 49 8B D9";
+        addresses.textureCreateTransient = scanner->Resolve(self, &textureCreate);
+
         return addresses.terrainConstruct != 0 && addresses.terrainDestruct != 0 &&
             addresses.mapMenuNativeTick != 0 && addresses.mapMenuNativeOnDeactivated != 0 &&
+            addresses.textureCreateTransient != 0 &&
             addresses.isGameThread != 0 && addresses.activeGarbageCollection != 0 &&
             addresses.exitPurge != 0 && addresses.isGarbageCollectingAndLocking != 0 &&
             addresses.isIncrementalPurgePending != 0 &&

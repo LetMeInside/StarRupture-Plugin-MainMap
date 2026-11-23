@@ -1,6 +1,8 @@
 #include "NativeApi.h"
 
 #include "Fingerprints.h"
+#include "Basic.hpp"
+#include "CoreUObject_structs.hpp"
 #include "plugin_helpers.h"
 #include "plugin_interface.h"
 
@@ -14,6 +16,21 @@ namespace
         using IsGameThreadFn = bool (*)();
         using PredicateFn = bool (*)();
         using MapMenuTickFn = void (*)(SDK::UObject*, const SDK::FGeometry&, float);
+        /** Matches UE 5.6 TConstArrayView64<uint8>: data pointer followed by signed 64-bit length. */
+        struct ConstByteView64 final
+        {
+            const uint8_t* Data = nullptr;
+            int64_t Num = 0;
+        };
+        static_assert(sizeof(ConstByteView64) == 16);
+        static_assert(alignof(ConstByteView64) == 8);
+        static_assert(offsetof(ConstByteView64, Data) == 0);
+        static_assert(offsetof(ConstByteView64, Num) == 8);
+        /** Matches the static UTexture2D overload's x64 native parameter sequence. */
+        using TextureCreateTransientFn = SDK::UTexture2D* (__fastcall*)(int32_t, int32_t,
+            SDK::EPixelFormat, SDK::FName, ConstByteView64);
+        static_assert(sizeof(SDK::FName) == 8);
+        static_assert(sizeof(SDK::EPixelFormat) == 1);
 
         ObjectFn retainObject = nullptr;
         ObjectFn releaseObject = nullptr;
@@ -27,6 +44,7 @@ namespace
         ObjectFn terrainDestruct = nullptr;
         MapMenuTickFn mapMenuNativeTick = nullptr;
         ObjectFn mapMenuNativeOnDeactivated = nullptr;
+        TextureCreateTransientFn textureCreateTransient = nullptr;
         ObjectFn originalTerrainConstruct = nullptr;
         ObjectFn originalTerrainDestruct = nullptr;
         MapMenuTickFn originalMapMenuNativeTick = nullptr;
@@ -136,7 +154,8 @@ namespace MainMapNative
             !addresses.isGameThread || !addresses.activeGarbageCollection || !addresses.exitPurge ||
             !addresses.isGarbageCollectingAndLocking || !addresses.isIncrementalPurgePending ||
             !addresses.isIncrementalReachabilityPending || !addresses.terrainConstruct || !addresses.terrainDestruct ||
-            !addresses.mapMenuNativeTick || !addresses.mapMenuNativeOnDeactivated)
+            !addresses.mapMenuNativeTick || !addresses.mapMenuNativeOnDeactivated ||
+            !addresses.textureCreateTransient)
             return false;
 
         NativeFunctions candidate{};
@@ -152,13 +171,15 @@ namespace MainMapNative
         candidate.terrainDestruct = reinterpret_cast<NativeFunctions::ObjectFn>(addresses.terrainDestruct);
         candidate.mapMenuNativeTick = reinterpret_cast<NativeFunctions::MapMenuTickFn>(addresses.mapMenuNativeTick);
         candidate.mapMenuNativeOnDeactivated = reinterpret_cast<NativeFunctions::ObjectFn>(addresses.mapMenuNativeOnDeactivated);
+        candidate.textureCreateTransient = reinterpret_cast<NativeFunctions::TextureCreateTransientFn>(
+            addresses.textureCreateTransient);
 
         if (!candidate.retainObject || !candidate.releaseObject || !candidate.isGameThread ||
             !candidate.activeGarbageCollection || !candidate.exitPurge ||
             !candidate.isGarbageCollectingAndLocking || !candidate.isIncrementalPurgePending ||
             !candidate.isIncrementalReachabilityPending || !candidate.terrainConstruct ||
             !candidate.terrainDestruct || !candidate.mapMenuNativeTick ||
-            !candidate.mapMenuNativeOnDeactivated)
+            !candidate.mapMenuNativeOnDeactivated || !candidate.textureCreateTransient)
             return false;
 
         g_functions = candidate;
@@ -189,6 +210,18 @@ namespace MainMapNative
         return g_initialized && g_accepting && !g_engineTeardown &&
             g_functions.isGameThread && g_functions.isGameThread() &&
             IsGCAdmittedOnGameThread();
+    }
+
+    /** Calls the typed engine texture constructor only while MainMap native admission is open. */
+    SDK::UTexture2D* NativeApi::CreateTransientTexture(int32_t width, int32_t height,
+        SDK::EPixelFormat format, const uint8_t* pixels, int64_t byteCount) noexcept
+    {
+        if (!pixels || byteCount <= 0 || !CanOperate() || !g_functions.textureCreateTransient)
+        {
+            return nullptr;
+        }
+        const NativeFunctions::ConstByteView64 initialData{pixels, byteCount};
+        return g_functions.textureCreateTransient(width, height, format, SDK::FName{}, initialData);
     }
 
     size_t OutstandingLeaseCount() noexcept

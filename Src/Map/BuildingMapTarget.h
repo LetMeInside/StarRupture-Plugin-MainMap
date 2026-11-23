@@ -189,6 +189,9 @@ namespace MainMapBuildingMap
             std::uint32_t CompositionFailures = 0;
             std::uint32_t ReleaseDeferrals = 0;
             std::uint32_t SuccessfulReleaseRetries = 0;
+            std::uint64_t CreatedSourceTextures = 0;
+            double DirectCreationTotalMs = 0.0;
+            double DirectCreationLongestMs = 0.0;
             std::int64_t FirstFailureGridX = 0;
             std::int64_t FirstFailureGridY = 0;
             std::int64_t FirstReleaseGridX = 0;
@@ -207,21 +210,9 @@ namespace MainMapBuildingMap
             double Bottom = 0.0;
         };
 
-        /** Validates source metadata and encodes its RGBA8 pixels into one in-memory PNG. */
-        static bool EncodePng(const SectionImage& image, std::vector<uint8_t>& pngBytes);
-        /** Appends an uncompressed DEFLATE stream containing the PNG scanlines. */
-        static bool EncodeDeflate(const SectionImage& image, std::vector<uint8_t>& deflateBytes);
-        /** Appends a PNG chunk with a computed CRC over its type and payload. */
-        static void AppendPngChunk(const char type[4], const uint8_t* payload, size_t payloadSize,
-            std::vector<uint8_t>& pngBytes);
-        /** Updates the PNG CRC-32 state for one byte. */
-        static uint32_t UpdateCrc32(uint32_t crc, uint8_t value) noexcept;
-        /** Writes one network-order integer into a PNG output vector. */
-        static void AppendBigEndian32(uint32_t value, std::vector<uint8_t>& bytes);
-        /** Appends the Adler-32 trailer required by a zlib-wrapped DEFLATE stream. */
-        static void AppendAdler32(const std::vector<uint8_t>& bytes,
-            std::vector<uint8_t>& deflateBytes);
-        /** Imports and validates one newly selected Section input texture. */
+        /** Checks positive int32 dimensions, tight RGBA8 stride, exact byte count, buffer size, and signed-view bounds. */
+        static bool ValidateRgba8Image(const SectionImage& image) noexcept;
+        /** Creates and validates one source texture; on success resources owns its lease, and on failure the caller retains candidate cleanup responsibility. */
         bool CreateInputTexture(SDK::UObject* worldContext, const SectionImage& image,
             ResourceSet& resources);
         /** Creates and validates an RGBA16f render target at the image's exact dimensions. */
@@ -314,7 +305,7 @@ namespace MainMapBuildingMap
         /** Releases a stale or invalid pending pair and preserves retry bookkeeping on rejection. */
         bool ResetPendingSourceTexture(const CompositeSectionSource& source,
             SourceTextureEntry& entry) noexcept;
-        /** Builds one imported texture and its bound MID, distinguishing parent-release deferral. */
+        /** Creates one source texture and its bound MID, distinguishing parent-release deferral. */
         bool BuildSourceTextureCandidate(SDK::UObject* worldContext,
             const CompositeSectionSource& source, const SectionImage& image,
             SourceTextureEntry& entry, ResourceSet& candidate,
@@ -323,7 +314,7 @@ namespace MainMapBuildingMap
         bool ImportReplacementSourceTexture(SDK::UObject* worldContext,
             const CompositeSectionSource& source, const SectionImage& image,
             SourceTextureEntry& entry) noexcept;
-        /** Preserves a genuine unchanged import/material failure without repeating its PNG import. */
+        /** Preserves a genuine unchanged source/material failure without repeating texture creation. */
         void RecordFailedSourceTextureBuild(const CompositeSectionSource& source,
             ResourceSet& candidate, SourceTextureEntry& entry, bool materialFailure) noexcept;
         /** Adopts a fully validated source pair after retiring its prior accepted pair. */

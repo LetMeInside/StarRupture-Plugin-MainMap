@@ -6,6 +6,7 @@
 #include "BuildingMapRemote.h"
 #include "BuildingMapTarget.h"
 #include "BuildingMapPresentation.h"
+#include "BuildingMapTimingDiagnostics.h"
 #include "BuildingMapLayout.h"
 #include "Config/Config.h"
 #include "RenderingProof.h"
@@ -661,6 +662,13 @@ namespace MainMapBuildingLayer
     /** Advances the admitted terrain session and overlay, with automatic geometry sampling in Client Debug. */
     void Tick()
     {
+#if defined(_DEBUG)
+        static std::uint64_t timingTick = 0;
+        MainMapBuildingMap::BuildingMapTimingDiagnostics::Context timingContext{};
+        timingContext.Tick = ++timingTick;
+        MainMapBuildingMap::BuildingMapTimingDiagnostics::SetContext(timingContext);
+        MainMapBuildingMap::BuildingMapTimingDiagnostics::Scope tickTiming("building-layer.tick");
+#endif
         if (!MainMapNative::CanOperate())
         {
             LogSessionGate(g_tickWithoutAdmission,0,"terrain Tick blocked",nullptr,"native-admission-closed");
@@ -712,8 +720,23 @@ namespace MainMapBuildingLayer
         const bool providerMovementDeferred=leftButtonHeld||session.zoomSettlementPending;
         const WorldRect requestedWorld=providerMovementDeferred&&session.providerWorldValid
             ?session.providerWorld:visibleWorld;
+#if defined(_DEBUG)
+        timingContext.ZoomPending = session.zoomSettlementPending;
+        timingContext.LeftButtonHeld = leftButtonHeld;
+        timingContext.RequestedBoundsChanged = !session.providerWorldValid ||
+            requestedWorld.minX != session.providerWorld.minX ||
+            requestedWorld.minY != session.providerWorld.minY ||
+            requestedWorld.maxX != session.providerWorld.maxX ||
+            requestedWorld.maxY != session.providerWorld.maxY;
+        timingContext.Images = g_buildingMapRemote.Images().size();
+        MainMapBuildingMap::BuildingMapTimingDiagnostics::SetContext(timingContext);
+        const auto providerStarted = std::chrono::steady_clock::now();
+#endif
         const auto viewportUpdate=g_buildingMapRemote.UpdateViewport(requestedWorld.minX,requestedWorld.minY,
             requestedWorld.maxX-requestedWorld.minX,requestedWorld.maxY-requestedWorld.minY);
+#if defined(_DEBUG)
+        MainMapBuildingMap::BuildingMapTimingDiagnostics::Record("building-map.remote-update", providerStarted);
+#endif
         if (viewportUpdate==MainMapBuildingMap::BuildingMapRemote::ViewportUpdateResult::Opened ||
             viewportUpdate==MainMapBuildingMap::BuildingMapRemote::ViewportUpdateResult::Updated)
         {
@@ -738,6 +761,13 @@ namespace MainMapBuildingLayer
                 g_buildingMapRemote, session.epoch);
         }
         const auto& gridPlanner = MainMapBuildingMap::BuildingMapTarget::GetGridPlannerShared();
+#if defined(_DEBUG)
+        timingContext.GroupingN = gridPlanner.CurrentPlan().IsValid
+            ? gridPlanner.CurrentPlan().GroupingN : 0;
+        timingContext.Sources = MainMapBuildingMap::BuildingMapTarget::GetGridSourcesShared().size();
+        timingContext.Images = g_buildingMapRemote.Images().size();
+        MainMapBuildingMap::BuildingMapTimingDiagnostics::SetContext(timingContext);
+#endif
         const bool sourceSnapshotCurrent =
             g_buildingMapRemote.GetPollState() == MainMapBuildingMap::BuildingMapRemote::PollState::Complete &&
             MainMapBuildingMap::BuildingMapTarget::HasCurrentGridSourcesShared();
@@ -762,9 +792,17 @@ namespace MainMapBuildingLayer
         const auto compositeTargets = MainMapBuildingMap::BuildingMapTarget::GetCompositeTargetInfosShared();
         // The update can recreate some presentation owners before reporting failure.
         session.presentationRetired = false;
-        if (!MainMapBuildingMap::BuildingMapPresentation::UpdateGridShared(context,
+#if defined(_DEBUG)
+        const auto presentationStarted = std::chrono::steady_clock::now();
+#endif
+        const bool presentationUpdated = MainMapBuildingMap::BuildingMapPresentation::UpdateGridShared(context,
             presentationCanvas, presentationTree, compositeTargets, sourceSnapshotCurrent,
-            MainMapRenderingProof::RenderingProof::IsMaterialContainerReady()))
+            MainMapRenderingProof::RenderingProof::IsMaterialContainerReady());
+#if defined(_DEBUG)
+        MainMapBuildingMap::BuildingMapTimingDiagnostics::Record(
+            "building-map.presentation-update", presentationStarted);
+#endif
+        if (!presentationUpdated)
             LogSessionGate(session.diagnosticTickBlocks,10,"Building Map presentation update failed",
                 &session,"resource-or-geometry-update-rejected");
     }

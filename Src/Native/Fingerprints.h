@@ -21,6 +21,7 @@ namespace MainMapFingerprints
         uintptr_t terrainDestruct = 0;
         uintptr_t mapMenuNativeTick = 0;
         uintptr_t mapMenuNativeOnDeactivated = 0;
+        uintptr_t textureCreateTransient = 0;
     };
 
     // Every entry is mandatory. A miss rejects plugin loading.
