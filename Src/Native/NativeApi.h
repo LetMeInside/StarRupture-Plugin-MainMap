@@ -4,6 +4,7 @@
 struct IPluginSelf;
 
 namespace SDK { class UObject; }
+namespace SDK { struct FGeometry; }
 namespace MainMapFingerprints { struct ResolvedAddresses; }
 
 namespace MainMapNative
@@ -17,9 +18,15 @@ namespace MainMapNative
     // Rejected destruction is notification only: consumer must not touch
     // UObjects or session ownership; it may request cleanup using atomic state.
     using TerrainDestructCallback = void (*)(SDK::UObject* terrain, bool admitted);
-    bool InstallTerrainHooks(IPluginSelf* self, TerrainCallback afterConstruct,
-        TerrainDestructCallback beforeDestruct);
-    void RemoveTerrainHooks() noexcept;
+    using MapMenuTickCallback = void (*)(SDK::UObject* menu,
+        const SDK::FGeometry& geometry, float deltaTime);
+    using MapMenuDeactivatedCallback = void (*)(SDK::UObject* menu);
+    // Installs all required terrain/menu hooks and rolls back the full set on any failure.
+    bool InstallLifecycleHooks(IPluginSelf* self, TerrainCallback afterConstruct,
+        TerrainDestructCallback beforeDestruct, MapMenuTickCallback beforeMenuTick,
+        MapMenuDeactivatedCallback beforeMenuDeactivated);
+    // Removes the menu hooks before terrain hooks and clears every typed original pointer.
+    void RemoveLifecycleHooks() noexcept;
     size_t OutstandingLeaseCount() noexcept;
 
     // Closes new acquisition. Existing leases must be reset before engine

@@ -66,7 +66,7 @@ void OnPluginLoadHooks(IPluginSelf* self, IPluginHookScanner* scanner)
     g_nativeAddresses = {};
     if (!MainMapFingerprints::Resolve(self, scanner, g_nativeAddresses))
     {
-        LOG_ERROR("MainMap: mandatory native lifetime fingerprint resolution failed");
+            LOG_ERROR("MainMap: mandatory native lifecycle fingerprint resolution failed");
         return;
     }
 #else

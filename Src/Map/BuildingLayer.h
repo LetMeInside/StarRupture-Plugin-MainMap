@@ -3,6 +3,7 @@
 
 namespace SDK { class UObject; class UWorld; }
 namespace SDK { class UCanvasPanel; class UWidgetTree; }
+namespace SDK { class UCrUW_MapMenu; struct FGeometry; }
 namespace MainMapBuildingMap { class BuildingMapRemote; }
 
 namespace MainMapBuildingLayer
@@ -24,6 +25,11 @@ namespace MainMapBuildingLayer
     // If not admitted, this only requests cleanup; it never touches UObjects.
     bool TerrainDestruct(SDK::UObject* terrain, bool admitted);
     void Tick();
+    // Runs before the matched map-menu native tick using its current allotted geometry.
+    void MapMenuNativeTick(SDK::UObject* menu, const SDK::FGeometry& geometry,
+        float deltaTime);
+    // Withdraws menu-owned presentation before CommonUI's native deactivation runs.
+    void MapMenuNativeOnDeactivated(SDK::UObject* menu);
     // ChimeraMain callback identity; does not dereference or retain the world.
     void WorldBeginPlay(SDK::UWorld* world);
     bool BeforeWorldEnd(SDK::UWorld* world);

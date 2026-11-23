@@ -49,6 +49,7 @@ namespace
         uint64_t epoch=0;
         bool closing=false;
         bool terrainDestructionStarted=false;
+        bool presentationRetired=false;
         bool providerWorldValid=false;
         bool viewportScaleObserved=false;
         bool zoomSettlementPending=false;
@@ -56,6 +57,23 @@ namespace
         uint64_t diagnosticContextRejections=0;
         uint64_t diagnosticCleanupDeferrals=0;
         const char* closingReason=nullptr;
+
+        /** Retires current presentation and preserves completion until a later presentation update begins. */
+        bool RetirePresentation()
+        {
+            if (presentationRetired)
+                return true;
+            if (!MainMapBuildingMap::BuildingMapPresentation::RetireShared(terrainDestructionStarted))
+                return false;
+            presentationRetired = true;
+            return true;
+        }
+
+        /** Restores and releases the optional layout while retaining its owner on failure. */
+        bool RestoreLayoutAndRelease()
+        {
+            return !layout || layout->RestoreAndRelease();
+        }
 
         /** Tracks significant viewport scale changes and clears zoom deferral after 250 ms of stability. */
         void ObserveViewportScale(double width, double height,
@@ -197,6 +215,59 @@ namespace
         return level && IsInstance(level) && level->OwningWorld==world;
     }
 
+    // Correlates a native menu callback with the retained current terrain session.
+    bool MatchMenuToSession(SDK::UObject* object, SDK::UCrUW_MapMenu*& menu,
+        bool requireActivated)
+    {
+        menu = nullptr;
+        if (!g_session || g_session->closing || g_stopping.load() || !object)
+            return false;
+
+        if (g_session->owningMenu.Get())
+        {
+            if (g_session->owningMenu.Get() != object ||
+                g_session->world.Get() != g_gameplayWorld.load())
+                return false;
+            auto* candidate = static_cast<SDK::UCrUW_MapMenu*>(object);
+            if (requireActivated)
+            {
+                const auto terminating = SDK::EObjectFlags::BeginDestroyed |
+                    SDK::EObjectFlags::FinishDestroyed;
+                if ((static_cast<unsigned>(candidate->Flags) &
+                    static_cast<unsigned>(terminating)) != 0 || !candidate->bIsActive)
+                    return false;
+            }
+            menu = candidate;
+            return true;
+        }
+
+        if (!IsInstance(object) || !object->IsA(SDK::UCrUW_MapMenu::StaticClass()))
+            return false;
+        auto* candidate = static_cast<SDK::UCrUW_MapMenu*>(object);
+
+        auto* terrain = static_cast<SDK::UCrUW_MapMenuTerrain*>(g_session->terrain.Get());
+        auto* world = static_cast<SDK::UWorld*>(g_session->world.Get());
+        if (!IsCurrentTerrainWorld(terrain, world))
+            return false;
+
+        auto* menuTree = candidate->WidgetTree;
+        auto* area = candidate->MapMenuMapArea;
+        auto* terrainTree = terrain->WidgetTree;
+        if (!menuTree || !area || !terrainTree || !IsInstance(menuTree) ||
+            !IsInstance(area) || !IsInstance(terrainTree) ||
+            menuTree->Outer != candidate || area->Outer != menuTree ||
+            terrainTree->Outer != terrain || area->MapMenuTerrain != terrain ||
+            (g_session->owningMenu.Get() && g_session->owningMenu.Get() != candidate))
+            return false;
+
+        if (requireActivated && !candidate->bIsActive)
+            return false;
+        if (!g_session->owningMenu.Get() && !g_session->owningMenu.Acquire(candidate))
+            return false;
+        menu = candidate;
+        return true;
+    }
+
     bool TryGetVisibleWorldRectImpl(MainMapBuildingLayer::WorldRect& out)
     {
         if(!MainMapNative::CanOperate()||!g_session||g_session->closing) return false;
@@ -282,7 +353,7 @@ namespace
                 &session,"native-admission-closed");
             return false;
         }
-        if (!MainMapBuildingMap::BuildingMapPresentation::RetireShared(session.terrainDestructionStarted))
+        if (!session.RetirePresentation())
         {
             LogSessionGate(session.diagnosticCleanupDeferrals,3,"terrain session cleanup deferred",
                 &session,"presentation-resource-release-rejected");
@@ -302,13 +373,8 @@ namespace
         }
         g_buildingMapRemote.CloseViewport();
         session.ResetProviderViewportState();
-        if (session.layout && !session.layout->RestoreAndRelease())
-        {
-            // Exceptional fallback: keep the unresolved layout owner and its
-            // remaining native leases alive without adding another retry manager.
-            session.layout.release();
-            LOG_WARN("MainMap: ExpandedMap restoration incomplete; unresolved UObject leases retained; session cleanup continues");
-        }
+        if (!session.RestoreLayoutAndRelease())
+            return false;
         // Retire the Section composition before releasing terrain dependencies.
         // Preserve every terrain lease if any release is rejected.
         if (!session.owningMenu.Reset() || !session.canvas.Reset() ||
@@ -629,13 +695,6 @@ namespace MainMapBuildingLayer
             session.ResetProviderViewportState();
             return;
         }
-        auto* menu=static_cast<SDK::UCrUW_MapMenu*>(session.owningMenu.Get());
-        if (session.layout)
-        {
-            const auto layoutResult=session.layout->Update(menu, Config::Get().ExpandedMap);
-            if (layoutResult==MainMapBuildingLayout::BuildingMapLayout::UpdateResult::WaitingForSlate)
-                return;
-        }
         MainMapBuildingLayer::WorldRect visibleWorld{};
         if (!TryGetVisibleWorldRect(visibleWorld))
         {
@@ -701,11 +760,61 @@ namespace MainMapBuildingLayer
             return;
         }
         const auto compositeTargets = MainMapBuildingMap::BuildingMapTarget::GetCompositeTargetInfosShared();
+        // The update can recreate some presentation owners before reporting failure.
+        session.presentationRetired = false;
         if (!MainMapBuildingMap::BuildingMapPresentation::UpdateGridShared(context,
             presentationCanvas, presentationTree, compositeTargets, sourceSnapshotCurrent,
             MainMapRenderingProof::RenderingProof::IsMaterialContainerReady()))
             LogSessionGate(session.diagnosticTickBlocks,10,"Building Map presentation update failed",
                 &session,"resource-or-geometry-update-rejected");
+    }
+
+    void MapMenuNativeTick(SDK::UObject* object, const SDK::FGeometry& geometry,
+        float deltaTime)
+    {
+        (void)deltaTime;
+        SDK::UCrUW_MapMenu* menu = nullptr;
+        if (!MatchMenuToSession(object, menu, true))
+            return;
+
+        auto& session = *g_session;
+        if (!session.layout)
+            return;
+
+        const bool expanded = Config::Get().ExpandedMap;
+        const SDK::FVector2D allottedSize = expanded
+            ? SDK::USlateBlueprintLibrary::GetLocalSize(geometry)
+            : SDK::FVector2D{};
+        session.layout->Update(menu, expanded, allottedSize);
+    }
+
+    void MapMenuNativeOnDeactivated(SDK::UObject* object)
+    {
+        SDK::UCrUW_MapMenu* menu = nullptr;
+        if (!MatchMenuToSession(object, menu, false))
+            return;
+        (void)menu;
+
+        auto& session = *g_session;
+        if (!session.RetirePresentation())
+        {
+            LOG_WARN("MainMap: map-menu deactivation deferred; presentation owners retained");
+            return;
+        }
+        if (!MainMapBuildingMap::BuildingMapTarget::InvalidateGridPlanInputShared())
+        {
+            LOG_WARN("MainMap: map-menu deactivation deferred; grid-input owners retained");
+            return;
+        }
+        if (!MainMapBuildingMap::BuildingMapTarget::RetireShared())
+        {
+            LOG_WARN("MainMap: map-menu deactivation deferred; composition owners retained");
+            return;
+        }
+        g_buildingMapRemote.CloseViewport();
+        session.ResetProviderViewportState();
+        if (session.layout && !session.layout->RestoreAndRelease())
+            LOG_WARN("MainMap: map-menu deactivation deferred; native layout owners retained");
     }
 
     void WorldBeginPlay(SDK::UWorld* world)
@@ -735,8 +844,8 @@ namespace MainMapBuildingLayer
     {
         if (g_stopping.exchange(true)) return;
         Close("shutdown");
-        const bool presentationRetired=MainMapBuildingMap::BuildingMapPresentation::RetireShared(
-            g_session && g_session->terrainDestructionStarted);
+        const bool presentationRetired = g_session ? g_session->RetirePresentation() :
+            MainMapBuildingMap::BuildingMapPresentation::RetireShared();
         if (presentationRetired && MainMapBuildingMap::BuildingMapTarget::RetireShared() && g_session)
             Cleanup();
         g_buildingMapRemote.Shutdown();

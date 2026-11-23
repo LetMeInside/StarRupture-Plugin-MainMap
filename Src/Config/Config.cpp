@@ -47,6 +47,53 @@ namespace
     bool g_acceptChanges = false;
     bool g_callbackRegistered = false;
 
+    /** Parses the Boolean spellings accepted from both schema reads and live notifications. */
+    class BooleanConfigParser final
+    {
+    public:
+        /** Converts true/false and 1/0 text, returning false for every other spelling. */
+        static bool Parse(std::string_view text, bool& value)
+        {
+            if (text == "true" || text == "1")
+            {
+                value = true;
+                return true;
+            }
+            if (text == "false" || text == "0")
+            {
+                value = false;
+                return true;
+            }
+            return false;
+        }
+
+        /** Reads and validates all current schema values into an owned settings snapshot. */
+        static bool ReadSettings(IPluginSelf* self, IPluginConfig* config, Config::Settings& settings)
+        {
+            char expandedMapText[16]{};
+            char hideFoWText[16]{};
+            char showBuildingLayerText[16]{};
+            const bool expandedMapRead = config->ReadString(self, "Map", "ExpandedMap",
+                expandedMapText, sizeof(expandedMapText), "true");
+            const bool hideFoWRead = config->ReadString(self, "Map", "HideFoW",
+                hideFoWText, sizeof(hideFoWText), "false");
+            const bool showBuildingLayerRead = config->ReadString(self, "Buildings", "ShowLayer",
+                showBuildingLayerText, sizeof(showBuildingLayerText), "true");
+            bool expandedMapValue = false;
+            bool hideFoWValue = false;
+            bool showBuildingLayerValue = false;
+            if (!expandedMapRead || !hideFoWRead || !showBuildingLayerRead ||
+                !Parse(expandedMapText, expandedMapValue) || !Parse(hideFoWText, hideFoWValue) ||
+                !Parse(showBuildingLayerText, showBuildingLayerValue))
+                return false;
+
+            settings.ExpandedMap = expandedMapValue;
+            settings.HideFoW = hideFoWValue;
+            settings.ShowBuildingLayer = showBuildingLayerValue;
+            return true;
+        }
+    };
+
     /** Validates the notified section, key, and text, then updates settings only. */
     void OnConfigChanged(const char* section, const char* key, const char* newValue)
     {
@@ -65,9 +112,9 @@ namespace
             return;
 
         const std::string_view value(newValue);
-        if (value != "true" && value != "false")
+        bool parsedValue = false;
+        if (!BooleanConfigParser::Parse(value, parsedValue))
             return;
-        const bool parsedValue = value == "true";
 
         std::lock_guard lock(g_settingsMutex);
         if (!g_acceptChanges)
@@ -101,24 +148,13 @@ namespace Config
         }
         if (config->ValidateConfig != nullptr)
             config->ValidateConfig(self, &kSchema);
-        char expandedMapText[16]{};
-        char hideFoWText[16]{};
-        char showBuildingLayerText[16]{};
-        const bool expandedMapRead = config->ReadString(self, "Map", "ExpandedMap", expandedMapText, sizeof(expandedMapText), "true");
-        const bool hideFoWRead = config->ReadString(self, "Map", "HideFoW", hideFoWText, sizeof(hideFoWText), "false");
-        const bool showBuildingLayerRead = config->ReadString(self, "Buildings", "ShowLayer", showBuildingLayerText, sizeof(showBuildingLayerText), "true");
-        const bool valuesRead = expandedMapRead && hideFoWRead && showBuildingLayerRead &&
-            ((std::strcmp(expandedMapText, "true") == 0) || (std::strcmp(expandedMapText, "false") == 0)) &&
-            ((std::strcmp(hideFoWText, "true") == 0) || (std::strcmp(hideFoWText, "false") == 0)) &&
-            ((std::strcmp(showBuildingLayerText, "true") == 0) || (std::strcmp(showBuildingLayerText, "false") == 0));
-        if (!valuesRead)
+        Config::Settings loadedSettings{};
+        if (!BooleanConfigParser::ReadSettings(self, config, loadedSettings))
             LOG_WARN("MainMap: configuration read or validation failed; using built-in settings");
         else
         {
             std::lock_guard lock(g_settingsMutex);
-            g_settings.ExpandedMap = std::strcmp(expandedMapText, "true") == 0;
-            g_settings.HideFoW = std::strcmp(hideFoWText, "true") == 0;
-            g_settings.ShowBuildingLayer = std::strcmp(showBuildingLayerText, "true") == 0;
+            g_settings = loadedSettings;
         }
         if (self->hooks == nullptr || self->hooks->UI == nullptr ||
             self->hooks->UI->RegisterOnConfigChanged == nullptr ||

@@ -27,6 +27,21 @@ namespace
 #endif
     }
 
+    void ObserveMapMenuTick(SDK::UObject* menu, const SDK::FGeometry& geometry,
+        float deltaTime)
+    {
+#ifdef MODLOADER_CLIENT_BUILD
+        MainMapBuildingLayer::MapMenuNativeTick(menu, geometry, deltaTime);
+#endif
+    }
+
+    void ObserveMapMenuDeactivated(SDK::UObject* menu)
+    {
+#ifdef MODLOADER_CLIENT_BUILD
+        MainMapBuildingLayer::MapMenuNativeOnDeactivated(menu);
+#endif
+    }
+
     void OnWorldBeginPlay(SDK::UWorld* world)
     {
 #ifdef MODLOADER_CLIENT_BUILD
@@ -118,7 +133,9 @@ namespace MainMapRenderingProof
             LOG_ERROR("MainMap: required engine tick/world lifecycle callbacks are unavailable");
             return false;
         }
-        if(!MainMapNative::InstallTerrainHooks(g_self,ObserveTerrainConstruct,ObserveTerrainDestruct)) return false;
+        if(!MainMapNative::InstallLifecycleHooks(g_self, ObserveTerrainConstruct,
+            ObserveTerrainDestruct, ObserveMapMenuTick, ObserveMapMenuDeactivated))
+            return false;
         world->RegisterOnBeforeWorldEndPlay(BeforeWorldEnd);
         world->RegisterOnWorldBeginPlay(OnWorldBeginPlay);
         g_resourceSetupAttempted = false;
@@ -135,7 +152,7 @@ namespace MainMapRenderingProof
         MainMapBuildingLayer::Shutdown();
 #endif
         (void)earlyEngineShutdown;
-        MainMapNative::RemoveTerrainHooks();
+        MainMapNative::RemoveLifecycleHooks();
         if (g_registered && g_self && g_self->hooks && g_self->hooks->Engine)
         {
             g_self->hooks->Engine->UnregisterOnTick(OnTick);

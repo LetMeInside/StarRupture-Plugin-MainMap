@@ -45,6 +45,24 @@ namespace MainMapBuildingLayout
         return object == nullptr;
     }
 
+    /** Names a missing object, terminating outer, or invalid outer chain for failure logs. */
+    const char* BuildingMapLayout::GetObjectFailure(SDK::UObject* object)
+    {
+        if (!object)
+            return "unavailable";
+
+        const auto forbidden = SDK::EObjectFlags::ClassDefaultObject | SDK::EObjectFlags::ArchetypeObject |
+            SDK::EObjectFlags::InheritableComponentTemplate | SDK::EObjectFlags::BeginDestroyed |
+            SDK::EObjectFlags::FinishDestroyed;
+        for (int depth = 0; object && depth < 32; ++depth, object = object->Outer)
+        {
+            if ((static_cast<unsigned>(object->Flags) & static_cast<unsigned>(forbidden)) != 0)
+                return "terminating-or-non-instance";
+        }
+
+        return object == nullptr ? "available" : "invalid-outer-chain";
+    }
+
     /** Compares finite points using a small tolerance for Slate float readback. */
     bool BuildingMapLayout::SamePoint(const SDK::FVector2D& left, const SDK::FVector2D& right)
     {
@@ -195,6 +213,8 @@ namespace MainMapBuildingLayout
                 !std::isfinite(layout.Offsets.Right) || !std::isfinite(layout.Offsets.Bottom))
                 return false;
 
+            states[index]->name = index == 0 ? "legend" : index == 1 ? "zoom" :
+                index == 2 ? "frame" : index == 3 ? "map" : "buttons";
             if (!states[index]->slot.Acquire(slotList[index]))
                 return false;
 
@@ -389,56 +409,106 @@ namespace MainMapBuildingLayout
     /** Restores the owned fields of one slot without replacing unrelated properties. */
     bool BuildingMapLayout::RestoreSlot(SDK::UCanvasPanelSlot* slot, SlotState& state)
     {
-        if (!slot || !IsLiveObject(state.widget) || slot->Content != state.widget)
+        if (!IsLiveObject(slot) || !IsLiveObject(state.widget) || slot->Content != state.widget)
+        {
+            if (reportRestoreDiagnostics_)
+                LOG_WARN("MainMap ExpandedMap restore failure slot=%s validation=slot-widget-relationship slotState=%s widgetState=%s slot=%p widget=%p",
+                    state.name ? state.name : "unknown", GetObjectFailure(slot),
+                    GetObjectFailure(state.widget), slot, state.widget);
             return false;
-        bool restored = true;
-        auto layout = slot->GetLayout();
-        if (state.positionOwned)
-        {
-            const SDK::FVector2D current{layout.Offsets.Left, layout.Offsets.Top};
-            if (SamePoint(current, state.applied.position))
-            {
-                slot->SetPosition(state.original.position);
-                layout = slot->GetLayout();
-            }
-            if (!SamePoint({layout.Offsets.Left, layout.Offsets.Top}, state.original.position))
-                restored = false;
-            else
-                state.positionOwned = false;
         }
-
-        if (state.sizeOwned)
-        {
-            const SDK::FVector2D current{layout.Offsets.Right, layout.Offsets.Bottom};
-            if (SamePoint(current, state.applied.size))
-            {
-                slot->SetSize(state.original.size);
-                layout = slot->GetLayout();
-            }
-            if (!SamePoint({layout.Offsets.Right, layout.Offsets.Bottom}, state.original.size))
-                restored = false;
-            else
-                state.sizeOwned = false;
-        }
-
-        if (state.alignmentOwned)
-        {
-            if (SamePoint(slot->GetAlignment(), state.applied.alignment))
-                slot->SetAlignment(state.original.alignment);
-            if (!SamePoint(slot->GetAlignment(), state.original.alignment))
-                restored = false;
-            else
-                state.alignmentOwned = false;
-        }
-
+        bool restored = RestorePosition(slot, state);
+        restored = RestoreSize(slot, state) && restored;
+        restored = RestoreAlignment(slot, state) && restored;
         return restored;
+    }
+
+    /** Restores one owned position while preserving intervening external writes. */
+    bool BuildingMapLayout::RestorePosition(SDK::UCanvasPanelSlot* slot, SlotState& state)
+    {
+        if (!state.positionOwned)
+            return true;
+
+        auto layout = slot->GetLayout();
+        const SDK::FVector2D current{layout.Offsets.Left, layout.Offsets.Top};
+        if (SamePoint(current, state.applied.position))
+        {
+            slot->SetPosition(state.original.position);
+            layout = slot->GetLayout();
+        }
+        const SDK::FVector2D readback{layout.Offsets.Left, layout.Offsets.Top};
+        if (!SamePoint(readback, state.original.position))
+        {
+            if (reportRestoreDiagnostics_)
+                LOG_WARN("MainMap ExpandedMap restore failure slot=%s property=position objectState=available validation=%s current=(%.3f,%.3f) original=(%.3f,%.3f) lastApplied=(%.3f,%.3f)",
+                    state.name, SamePoint(current, state.applied.position) ? "setter-readback-differs-from-original" : "current-conflicts-with-last-write",
+                    readback.X, readback.Y, state.original.position.X, state.original.position.Y,
+                    state.applied.position.X, state.applied.position.Y);
+            return false;
+        }
+        state.positionOwned = false;
+        return true;
+    }
+
+    /** Restores one owned size while preserving intervening external writes. */
+    bool BuildingMapLayout::RestoreSize(SDK::UCanvasPanelSlot* slot, SlotState& state)
+    {
+        if (!state.sizeOwned)
+            return true;
+
+        auto layout = slot->GetLayout();
+        const SDK::FVector2D current{layout.Offsets.Right, layout.Offsets.Bottom};
+        if (SamePoint(current, state.applied.size))
+        {
+            slot->SetSize(state.original.size);
+            layout = slot->GetLayout();
+        }
+        const SDK::FVector2D readback{layout.Offsets.Right, layout.Offsets.Bottom};
+        if (!SamePoint(readback, state.original.size))
+        {
+            if (reportRestoreDiagnostics_)
+                LOG_WARN("MainMap ExpandedMap restore failure slot=%s property=size objectState=available validation=%s current=(%.3f,%.3f) original=(%.3f,%.3f) lastApplied=(%.3f,%.3f)",
+                    state.name, SamePoint(current, state.applied.size) ? "setter-readback-differs-from-original" : "current-conflicts-with-last-write",
+                    readback.X, readback.Y, state.original.size.X, state.original.size.Y,
+                    state.applied.size.X, state.applied.size.Y);
+            return false;
+        }
+        state.sizeOwned = false;
+        return true;
+    }
+
+    /** Restores one owned alignment while preserving intervening external writes. */
+    bool BuildingMapLayout::RestoreAlignment(SDK::UCanvasPanelSlot* slot, SlotState& state)
+    {
+        if (!state.alignmentOwned)
+            return true;
+
+        const auto current = slot->GetAlignment();
+        if (SamePoint(current, state.applied.alignment))
+            slot->SetAlignment(state.original.alignment);
+        const auto readback = slot->GetAlignment();
+        if (!SamePoint(readback, state.original.alignment))
+        {
+            if (reportRestoreDiagnostics_)
+                LOG_WARN("MainMap ExpandedMap restore failure slot=%s property=alignment objectState=available validation=%s current=(%.3f,%.3f) original=(%.3f,%.3f) lastApplied=(%.3f,%.3f)",
+                    state.name, SamePoint(current, state.applied.alignment) ? "setter-readback-differs-from-original" : "current-conflicts-with-last-write",
+                    readback.X, readback.Y, state.original.alignment.X, state.original.alignment.Y,
+                    state.applied.alignment.X, state.applied.alignment.Y);
+            return false;
+        }
+        state.alignmentOwned = false;
+        return true;
     }
 
     /** Restores each slot and the root allocation, preserving any external changes. */
     bool BuildingMapLayout::Restore()
     {
-        if (!captured_ || !MainMapNative::CanOperate())
+        reportRestoreDiagnostics_ = !restoreDiagnosticsReported_;
+        if (!captured_)
             return !captured_;
+        if (!MainMapNative::CanOperate())
+            return false;
+        restoreDiagnosticsReported_ = true;
 
         bool restored = true;
         SlotState* states[] = {&legend_, &zoom_, &frame_, &map_, &buttons_};
@@ -449,27 +519,60 @@ namespace MainMapBuildingLayout
                 restored = false;
         }
 
-        auto* rootSlot = static_cast<SDK::UOverlaySlot*>(canvasRootSlot_.Get());
-        if (!rootSlot)
-        {
-            restored_ = false;
-            return false;
-        }
-        if (rootSlot->HorizontalAlignment == SDK::EHorizontalAlignment::HAlign_Fill)
-            rootSlot->SetHorizontalAlignment(originalHorizontal_);
-        if (rootSlot->VerticalAlignment == SDK::EVerticalAlignment::VAlign_Fill)
-            rootSlot->SetVerticalAlignment(originalVertical_);
-        if (rootSlot->HorizontalAlignment != originalHorizontal_ ||
-            rootSlot->VerticalAlignment != originalVertical_)
+        if (!RestoreRootAlignment())
             restored = false;
 
         restored_ = restored;
         return restored;
     }
 
+    /** Restores root alignments and reports conflicts or setter readback failures. */
+    bool BuildingMapLayout::RestoreRootAlignment()
+    {
+        auto* rootSlot = static_cast<SDK::UOverlaySlot*>(canvasRootSlot_.Get());
+        if (!IsLiveObject(rootSlot))
+        {
+            if (reportRestoreDiagnostics_)
+                LOG_WARN("MainMap ExpandedMap restore failure root property=alignment validation=root-slot-unavailable objectState=%s slot=%p",
+                    GetObjectFailure(canvasRootSlot_.Get()), canvasRootSlot_.Get());
+            return false;
+        }
+        if (rootSlot->HorizontalAlignment == SDK::EHorizontalAlignment::HAlign_Fill)
+        {
+            rootSlot->SetHorizontalAlignment(originalHorizontal_);
+            if (rootSlot->HorizontalAlignment != originalHorizontal_ && reportRestoreDiagnostics_)
+                LOG_WARN("MainMap ExpandedMap restore failure root property=horizontal-alignment objectState=available validation=setter-readback-differs-from-original current=%u original=%u lastApplied=%u",
+                    static_cast<unsigned>(rootSlot->HorizontalAlignment), static_cast<unsigned>(originalHorizontal_),
+                    static_cast<unsigned>(SDK::EHorizontalAlignment::HAlign_Fill));
+        }
+        if (rootSlot->VerticalAlignment == SDK::EVerticalAlignment::VAlign_Fill)
+        {
+            rootSlot->SetVerticalAlignment(originalVertical_);
+            if (rootSlot->VerticalAlignment != originalVertical_ && reportRestoreDiagnostics_)
+                LOG_WARN("MainMap ExpandedMap restore failure root property=vertical-alignment objectState=available validation=setter-readback-differs-from-original current=%u original=%u lastApplied=%u",
+                    static_cast<unsigned>(rootSlot->VerticalAlignment), static_cast<unsigned>(originalVertical_),
+                    static_cast<unsigned>(SDK::EVerticalAlignment::VAlign_Fill));
+        }
+        const bool restored = rootSlot->HorizontalAlignment == originalHorizontal_ &&
+            rootSlot->VerticalAlignment == originalVertical_;
+        if (!restored)
+        {
+            if (reportRestoreDiagnostics_)
+                LOG_WARN("MainMap ExpandedMap restore failure root property=alignment objectState=available validation=current-conflicts-with-last-write horizontal=%u originalHorizontal=%u lastHorizontal=%u vertical=%u originalVertical=%u lastVertical=%u",
+                    static_cast<unsigned>(rootSlot->HorizontalAlignment), static_cast<unsigned>(originalHorizontal_),
+                    static_cast<unsigned>(SDK::EHorizontalAlignment::HAlign_Fill),
+                    static_cast<unsigned>(rootSlot->VerticalAlignment), static_cast<unsigned>(originalVertical_),
+                    static_cast<unsigned>(SDK::EVerticalAlignment::VAlign_Fill));
+        }
+
+        return restored;
+    }
+
     /** Releases retained objects in slot-before-widget order and preserves rejected leases. */
     bool BuildingMapLayout::ReleaseLeases()
     {
+        reportLeaseDiagnostics_ = !leaseDiagnosticsReported_;
+        leaseDiagnosticsReported_ = true;
         bool released = true;
         SlotState* states[] = {&legend_, &zoom_, &frame_, &map_, &buttons_};
         for (auto* state : states)
@@ -477,12 +580,31 @@ namespace MainMapBuildingLayout
             if (state->slot.Reset())
                 state->widget = nullptr;
             else
+            {
                 released = false;
+                if (reportLeaseDiagnostics_)
+                    LOG_WARN("MainMap ExpandedMap lease release failure slot=%s layoutRestoration=%s object=%p nativeAdmission=%s release=retained-for-retry",
+                        state->name ? state->name : "unknown", restored_ ? "complete-or-not-required" : "incomplete",
+                        state->slot.Get(),
+                        MainMapNative::CanOperate() ? "available" : "unavailable");
+            }
         }
         if (!canvasRootSlot_.Reset())
+        {
             released = false;
+            if (reportLeaseDiagnostics_)
+                LOG_WARN("MainMap ExpandedMap lease release failure slot=root layoutRestoration=%s object=%p nativeAdmission=%s release=retained-for-retry",
+                    restored_ ? "complete-or-not-required" : "incomplete", canvasRootSlot_.Get(),
+                    MainMapNative::CanOperate() ? "available" : "unavailable");
+        }
         if (released && !menu_.Reset())
+        {
             released = false;
+            if (reportLeaseDiagnostics_)
+                LOG_WARN("MainMap ExpandedMap lease release failure slot=menu layoutRestoration=%s object=%p nativeAdmission=%s release=retained-for-retry",
+                    restored_ ? "complete-or-not-required" : "incomplete", menu_.Get(),
+                    MainMapNative::CanOperate() ? "available" : "unavailable");
+        }
         return released;
     }
 
@@ -496,15 +618,33 @@ namespace MainMapBuildingLayout
         restored_ = true;
         expanded_ = false;
         waitingForSlate_ = false;
+        reportRestoreDiagnostics_ = false;
+        restoreDiagnosticsReported_ = false;
+        admissionDiagnosticsReported_ = false;
+        reportLeaseDiagnostics_ = false;
+        leaseDiagnosticsReported_ = false;
+        failedMenu_ = nullptr;
     }
 
     /** Restores the original menu layout and releases every retained native object. */
     bool BuildingMapLayout::RestoreAndRelease()
     {
         if (!captured_)
-            return ReleaseLeases();
+        {
+            if (!ReleaseLeases())
+                return false;
+            Clear();
+            return true;
+        }
         if ((!restored_ && !Restore()) || !ReleaseLeases())
+        {
+            if (!admissionDiagnosticsReported_ && !MainMapNative::CanOperate())
+            {
+                LOG_WARN("MainMap ExpandedMap restore failure native-operation=unavailable validation=admission-rejected; captured layout owner retained");
+                admissionDiagnosticsReported_ = true;
+            }
             return false;
+        }
         Clear();
         return true;
     }
@@ -585,7 +725,7 @@ namespace MainMapBuildingLayout
 
     /** Runs configuration, settlement and responsive-size decisions on the captured menu. */
     BuildingMapLayout::UpdateResult BuildingMapLayout::UpdateCaptured(
-        SDK::UCrUW_MapMenu* menu, bool expanded)
+        SDK::UCrUW_MapMenu* menu, bool expanded, const SDK::FVector2D& liveSize)
     {
         if (!expanded)
         {
@@ -602,8 +742,6 @@ namespace MainMapBuildingLayout
             return UpdateResult::Ready;
         }
 
-        const auto liveSize = SDK::USlateBlueprintLibrary::GetLocalSize(
-            capturedWidgets_.root->GetCachedGeometry());
         if (!std::isfinite(liveSize.X) || !std::isfinite(liveSize.Y) || liveSize.X <= 0 || liveSize.Y <= 0)
             return UpdateResult::Ready;
         if (waitingForSlate_)
@@ -614,9 +752,14 @@ namespace MainMapBuildingLayout
     }
 
     /** Discovers once, handles menu replacement, and forwards current config to the captured layout. */
-    BuildingMapLayout::UpdateResult BuildingMapLayout::Update(SDK::UCrUW_MapMenu* menu, bool expanded)
+    BuildingMapLayout::UpdateResult BuildingMapLayout::Update(SDK::UCrUW_MapMenu* menu,
+        bool expanded, const SDK::FVector2D& allottedSize)
     {
         if (!MainMapNative::CanOperate() || !menu)
+            return UpdateResult::Ready;
+
+        if (captured_ && expanded && expanded_ && !waitingForSlate_ &&
+            SamePoint(allottedSize, lastAvailable_))
             return UpdateResult::Ready;
 
         if (!expanded && !captured_)
@@ -628,7 +771,7 @@ namespace MainMapBuildingLayout
             return UpdateResult::Ready;
         }
 
-        if (failedMenu_ == menu)
+        if (expanded && failedMenu_ == menu)
             return UpdateResult::Ready;
 
         if (captured_ && (capturedWidgets_.tree->Outer != menu || menu->WidgetTree != capturedWidgets_.tree ||
@@ -655,6 +798,6 @@ namespace MainMapBuildingLayout
             capturedWidgets_ = discovered;
         }
 
-        return UpdateCaptured(menu, expanded);
+        return UpdateCaptured(menu, expanded, allottedSize);
     }
 }

@@ -36,8 +36,9 @@ namespace MainMapBuildingLayout
         BuildingMapLayout(const BuildingMapLayout&) = delete;
         BuildingMapLayout& operator=(const BuildingMapLayout&) = delete;
 
-        /** Applies, resizes, or restores the layout for the admitted menu. */
-        UpdateResult Update(SDK::UCrUW_MapMenu* menu, bool expanded);
+        /** Applies, resizes, or restores from the admitted menu's current allotted dimensions. */
+        UpdateResult Update(SDK::UCrUW_MapMenu* menu, bool expanded,
+            const SDK::FVector2D& allottedSize);
 
         /** Restores owned values and releases leases; false keeps the owner alive for retry. */
         bool RestoreAndRelease();
@@ -48,6 +49,7 @@ namespace MainMapBuildingLayout
         {
             MainMapNative::StrongObjectLease slot;
             SDK::UWidget* widget = nullptr;
+            const char* name = nullptr;
             SlotLayout original{};
             SlotLayout applied{};
             bool positionOwned = false;
@@ -89,6 +91,9 @@ namespace MainMapBuildingLayout
         /** Rejects invalid or terminating native objects before typed access. */
         static bool IsLiveObject(SDK::UObject* object);
 
+        /** Identifies why a retained native object cannot be safely accessed. */
+        static const char* GetObjectFailure(SDK::UObject* object);
+
         /** Finds one named direct child and checks its panel slot ownership. */
         bool FindChild(SDK::UPanelWidget* parent, const char* name,
             SDK::UClass* type, SDK::UWidget*& child) const;
@@ -128,11 +133,24 @@ namespace MainMapBuildingLayout
         /** Restores only fields whose current values still equal this owner's last writes. */
         bool Restore();
 
+        /** Restores both owned alignments of the canvas root slot. */
+        bool RestoreRootAlignment();
+
         /** Restores the owned position, size and alignment fields of one captured slot. */
         bool RestoreSlot(SDK::UCanvasPanelSlot* slot, SlotState& state);
 
+        /** Restores one owned slot position and diagnoses conflicts or setter readback failures. */
+        bool RestorePosition(SDK::UCanvasPanelSlot* slot, SlotState& state);
+
+        /** Restores one owned slot size and diagnoses conflicts or setter readback failures. */
+        bool RestoreSize(SDK::UCanvasPanelSlot* slot, SlotState& state);
+
+        /** Restores one owned slot alignment and diagnoses conflicts or setter readback failures. */
+        bool RestoreAlignment(SDK::UCanvasPanelSlot* slot, SlotState& state);
+
         /** Runs config and geometry decisions after menu discovery or identity recovery. */
-        UpdateResult UpdateCaptured(SDK::UCrUW_MapMenu* menu, bool expanded);
+        UpdateResult UpdateCaptured(SDK::UCrUW_MapMenu* menu, bool expanded,
+            const SDK::FVector2D& allottedSize);
 
         /** Checks bounded Slate settlement and retires a failed application safely. */
         UpdateResult WaitForSlate(SDK::UCrUW_MapMenu* menu, const SDK::FVector2D& liveSize);
@@ -163,6 +181,11 @@ namespace MainMapBuildingLayout
         bool restored_ = true;
         bool expanded_ = false;
         bool waitingForSlate_ = false;
+        bool reportRestoreDiagnostics_ = false;
+        bool restoreDiagnosticsReported_ = false;
+        bool admissionDiagnosticsReported_ = false;
+        bool reportLeaseDiagnostics_ = false;
+        bool leaseDiagnosticsReported_ = false;
         std::chrono::steady_clock::time_point settlementDeadline_{};
     };
 }

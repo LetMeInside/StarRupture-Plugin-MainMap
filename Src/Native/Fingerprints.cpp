@@ -171,7 +171,26 @@ namespace MainMapFingerprints
             "0F 8E ?? ?? ?? ?? 4C 89 74 24 50 45 33 F6 0F 1F 44 00 00";
         addresses.terrainDestruct = scanner->Resolve(self, &terrain);
 
+        // CL-130045 entries were verified against PDB symbols and primary vtable
+        // slots; relative call displacements are masked in these unique signatures.
+        PluginScanRequest mapMenu = PLUGIN_SCAN_REQUEST_INIT;
+        mapMenu.kind = PLUGIN_SCAN_FUNCTION_START;
+        mapMenu.hookName = "MainMap::UCrUW_MapMenu::NativeTick";
+        mapMenu.pattern =
+            "48 89 5C 24 08 57 48 83 EC 30 F3 0F 10 89 28 06 00 00 "
+            "0F 57 C0 0F 2E C8 48 8B FA 48 8B D9 0F 29 74 24 20 0F 28 F2 "
+            "74 12 45 33 C0 E8 ?? ?? ?? ?? C7 83 28 06 00 00 00 00 00 00";
+        addresses.mapMenuNativeTick = scanner->Resolve(self, &mapMenu);
+        mapMenu.hookName = "MainMap::UCrUW_MapMenu::NativeOnDeactivated";
+        mapMenu.pattern =
+            "48 89 5C 24 08 57 48 83 EC 20 48 8B 01 48 8B D9 FF 90 80 01 00 00 "
+            "48 8B C8 E8 ?? ?? ?? ?? 48 8B F8 48 85 C0 74 2A E8 ?? ?? ?? ?? "
+            "48 8B 4F 10 48 83 C0 30 48 63 50 08 3B 51 38 7F 14 48 8B 49 30 "
+            "48 39 04 D1 75 0A 33 D2 48 8B CF E8 ?? ?? ?? ??";
+        addresses.mapMenuNativeOnDeactivated = scanner->Resolve(self, &mapMenu);
+
         return addresses.terrainConstruct != 0 && addresses.terrainDestruct != 0 &&
+            addresses.mapMenuNativeTick != 0 && addresses.mapMenuNativeOnDeactivated != 0 &&
             addresses.isGameThread != 0 && addresses.activeGarbageCollection != 0 &&
             addresses.exitPurge != 0 && addresses.isGarbageCollectingAndLocking != 0 &&
             addresses.isIncrementalPurgePending != 0 &&
