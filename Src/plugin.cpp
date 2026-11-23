@@ -115,18 +115,8 @@ extern "C"
         g_shutdownCallbackRegistered = true;
 #endif
 
-        if (!MainMapConfig::Initialize(g_self))
-        {
 #ifdef MODLOADER_CLIENT_BUILD
-            UnregisterEngineShutdownCallback();
-            MainMapNative::Shutdown();
-#endif
-            g_self = nullptr;
-            return false;
-        }
-
-#ifdef MODLOADER_CLIENT_BUILD
-        if (MainMapConfig::IsEnabled() && !MainMapRenderingProof::Initialize())
+        if (!MainMapRenderingProof::Initialize())
         {
             UnregisterEngineShutdownCallback();
             MainMapNative::Shutdown();
@@ -134,12 +124,14 @@ extern "C"
             return false;
         }
 #endif
+        Config::Initialize();
         return true;
     }
 
     __declspec(dllexport)
     void PluginShutdown()
     {
+        Config::Shutdown();
 #ifdef MODLOADER_CLIENT_BUILD
         MainMapRenderingProof::Shutdown();
         UnregisterEngineShutdownCallback();
