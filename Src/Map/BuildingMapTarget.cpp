@@ -697,7 +697,7 @@ namespace MainMapBuildingMap
             resources.Bounds.MaxY == assignment.Bounds.MaxY;
     }
 
-    /** Clears a dirty target and submits its current accepted Section contributions. */
+    /** Clears a dirty target, draws Section contributions, and closes the Canvas context. */
     bool BuildingMapTarget::ComposeCompositeTile(SDK::UObject* worldContext,
         const BuildingMapGridPlanner::SlotAssignment& assignment,
         const std::vector<const CompositeSectionSource*>& sources,

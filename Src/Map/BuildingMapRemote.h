@@ -103,14 +103,26 @@ namespace MainMapBuildingMap
             double widthMapUnits, double heightMapUnits, bool& updateAccepted);
         /** Copies each visible cell and commits availability/NO_IMAGE state only after a full poll. */
         bool PollVisibleImages(uint64_t visibleWidth, uint64_t visibleHeight);
+        /** Observes one cell and copies pixels only when no retained image matches its metadata. */
+        bool PollVisibleCell(uint64_t localX, uint64_t localY);
         /** Sorts and validates the current available/NO_IMAGE coordinate scratch sets. */
         bool ValidatePollCoordinates();
-        /** Retrieves one local cell using metadata-first buffer sizing and bounded retry. */
+        /** Reads current cell metadata without transferring completed image pixels. */
+        BuildingMapABIResult QuerySectionImage(uint64_t localX, uint64_t localY,
+            BuildingMapABISectionImage& metadata);
+        /** Copies one already-reported image and retries once if its required size changes. */
         BuildingMapABIResult CopySectionImage(uint64_t localX, uint64_t localY, BuildingMapABISectionImage& metadata);
+        /** Validates metadata layout and its coordinate-derived world bounds. */
+        bool ValidateImageMetadata(const BuildingMapABISectionImage& metadata) const noexcept;
+        /** Compares all image identity and layout metadata with one retained coordinate entry. */
+        bool MatchesRetainedImage(const BuildingMapABISectionImage& metadata,
+            const SectionImage& image) const noexcept;
         /** Resizes reusable MainMap scratch storage to a provider-reported byte count. */
         bool ResizeCopyBuffer(uint64_t requiredBytes) noexcept;
         /** Compares copied metadata and bytes, replacing only changed consumer-owned storage. */
         bool StoreChangedImage(const BuildingMapABISectionImage& metadata);
+        /** Assigns a local revision and stores newly copied MainMap-owned pixels. */
+        bool StoreNewImage(const BuildingMapABISectionImage& metadata, const SectionCoordinate& key);
         /** Clears invalidated opaque handles without calling the provider. */
         void AbandonHandles() noexcept;
         /** Releases only ownership the provider still validates after partial invalidation. */

@@ -8,6 +8,7 @@
 #include <Windows.h>
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 namespace MainMapBuildingMap
@@ -227,32 +228,38 @@ namespace MainMapBuildingMap
         return updateAccepted ? ViewportUpdateResult::Updated : ViewportUpdateResult::Rejected;
     }
 
-    /** Copies one cell using its current metadata and retries once if its required size changes. */
-    BuildingMapABIResult BuildingMapRemote::CopySectionImage(uint64_t localX, uint64_t localY,
+    /** Reads one cell's current metadata without requesting its pixel payload. */
+    BuildingMapABIResult BuildingMapRemote::QuerySectionImage(uint64_t localX, uint64_t localY,
         BuildingMapABISectionImage& metadata)
     {
         metadata = {};
         metadata.StructSize = sizeof(metadata);
-        auto result = table_.CopySectionImage(viewport_, localX, localY, &metadata, nullptr, 0);
-        if (result == BUILDING_MAP_ABI_NO_IMAGE)
-        {
-            return result;
-        }
-        if (result != BUILDING_MAP_ABI_BUFFER_TOO_SMALL)
-        {
-            return result;
-        }
+        return table_.CopySectionImage(viewport_, localX, localY, &metadata, nullptr, 0);
+    }
+
+    /** Copies a reported image and retries once when the provider's required size changes. */
+    BuildingMapABIResult BuildingMapRemote::CopySectionImage(uint64_t localX, uint64_t localY,
+        BuildingMapABISectionImage& metadata)
+    {
+        const int64_t expectedGridX = metadata.GridX;
+        const int64_t expectedGridY = metadata.GridY;
         if (!ResizeCopyBuffer(metadata.ByteCount))
         {
             return BUILDING_MAP_ABI_FAILED;
         }
 
+        BuildingMapABIResult result = BUILDING_MAP_ABI_FAILED;
         for (unsigned attempt = 0; attempt < 2; ++attempt)
         {
             metadata = {};
             metadata.StructSize = sizeof(metadata);
             result = table_.CopySectionImage(viewport_, localX, localY, &metadata,
                 copyBuffer_.data(), copyBuffer_.size());
+            if ((result == BUILDING_MAP_ABI_OK || result == BUILDING_MAP_ABI_BUFFER_TOO_SMALL) &&
+                (metadata.GridX != expectedGridX || metadata.GridY != expectedGridY))
+            {
+                return BUILDING_MAP_ABI_FAILED;
+            }
             if (result == BUILDING_MAP_ABI_OK && metadata.ByteCount <= copyBuffer_.size())
             {
                 copyBuffer_.resize(static_cast<size_t>(metadata.ByteCount));
@@ -271,6 +278,36 @@ namespace MainMapBuildingMap
             }
         }
         return result;
+    }
+
+    /** Validates RGBA8 storage geometry and coordinate-derived Section world bounds. */
+    bool BuildingMapRemote::ValidateImageMetadata(const BuildingMapABISectionImage& metadata) const noexcept
+    {
+        if (metadata.StructSize != sizeof(metadata) || metadata.Width == 0 || metadata.Height == 0 ||
+            metadata.Width > (std::numeric_limits<uint64_t>::max)() / 4 ||
+            metadata.RowStride != uint64_t(metadata.Width) * 4 ||
+            metadata.RowStride > (std::numeric_limits<uint64_t>::max)() / metadata.Height ||
+            metadata.ByteCount != metadata.RowStride * metadata.Height ||
+            !std::isfinite(metadata.XMapUnits) || !std::isfinite(metadata.YMapUnits) ||
+            !std::isfinite(metadata.SectionSizeMapUnits) || metadata.SectionSizeMapUnits <= 0.0)
+        {
+            return false;
+        }
+        const double expectedX = static_cast<double>(metadata.GridX) * metadata.SectionSizeMapUnits;
+        const double expectedY = static_cast<double>(metadata.GridY) * metadata.SectionSizeMapUnits;
+        return std::isfinite(expectedX) && std::isfinite(expectedY) &&
+            metadata.XMapUnits == expectedX && metadata.YMapUnits == expectedY;
+    }
+
+    /** Matches the complete coordinate and image layout identity promised by ABI v1. */
+    bool BuildingMapRemote::MatchesRetainedImage(const BuildingMapABISectionImage& metadata,
+        const SectionImage& image) const noexcept
+    {
+        return image.GridX == metadata.GridX && image.GridY == metadata.GridY &&
+            image.Width == metadata.Width && image.Height == metadata.Height &&
+            image.RowStride == metadata.RowStride && image.ByteCount == metadata.ByteCount &&
+            image.XMapUnits == metadata.XMapUnits && image.YMapUnits == metadata.YMapUnits &&
+            image.SectionSizeMapUnits == metadata.SectionSizeMapUnits;
     }
 
     /** Resizes reusable scratch bytes only when the provider's required count fits local storage. */
@@ -300,18 +337,7 @@ namespace MainMapBuildingMap
         {
             for (uint64_t localX = 0; localX < visibleWidth; ++localX)
             {
-                BuildingMapABISectionImage metadata{};
-                const auto result = CopySectionImage(localX, localY, metadata);
-                if (result == BUILDING_MAP_ABI_NO_IMAGE)
-                {
-                    noImageScratch_.emplace_back(metadata.GridX, metadata.GridY);
-                    continue;
-                }
-                if (result != BUILDING_MAP_ABI_OK || !StoreChangedImage(metadata))
-                {
-                    return false;
-                }
-                observedImageScratch_.emplace_back(metadata.GridX, metadata.GridY);
+                if (!PollVisibleCell(localX, localY)) return false;
             }
         }
 
@@ -337,6 +363,44 @@ namespace MainMapBuildingMap
         return true;
     }
 
+    /** Observes availability and acquires pixels only for a new or unretained image. */
+    bool BuildingMapRemote::PollVisibleCell(uint64_t localX, uint64_t localY)
+    {
+        BuildingMapABISectionImage metadata{};
+        const auto result = QuerySectionImage(localX, localY, metadata);
+        if (result == BUILDING_MAP_ABI_NO_IMAGE)
+        {
+            if (metadata.StructSize != sizeof(metadata) || metadata.Width != 0 || metadata.Height != 0 ||
+                metadata.RowStride != 0 || metadata.ByteCount != 0 || !std::isfinite(metadata.XMapUnits) ||
+                !std::isfinite(metadata.YMapUnits) || !std::isfinite(metadata.SectionSizeMapUnits) ||
+                metadata.SectionSizeMapUnits <= 0.0 ||
+                metadata.XMapUnits != static_cast<double>(metadata.GridX) * metadata.SectionSizeMapUnits ||
+                metadata.YMapUnits != static_cast<double>(metadata.GridY) * metadata.SectionSizeMapUnits ||
+                images_.find({metadata.GridX, metadata.GridY}) != images_.end())
+            {
+                return false;
+            }
+            noImageScratch_.emplace_back(metadata.GridX, metadata.GridY);
+            return true;
+        }
+        if (result != BUILDING_MAP_ABI_BUFFER_TOO_SMALL || !ValidateImageMetadata(metadata))
+        {
+            return false;
+        }
+        const auto key = std::make_pair(metadata.GridX, metadata.GridY);
+        const auto existing = images_.find(key);
+        if (existing != images_.end())
+        {
+            if (!MatchesRetainedImage(metadata, existing->second)) return false;
+            observedImageScratch_.push_back(key);
+            return true;
+        }
+        const auto copyResult = CopySectionImage(localX, localY, metadata);
+        if (copyResult != BUILDING_MAP_ABI_OK || !StoreChangedImage(metadata)) return false;
+        observedImageScratch_.emplace_back(metadata.GridX, metadata.GridY);
+        return true;
+    }
+
     /** Sorts both source-state sets and rejects duplicates or contradictory cell outcomes. */
     bool BuildingMapRemote::ValidatePollCoordinates()
     {
@@ -358,30 +422,27 @@ namespace MainMapBuildingMap
     /** Reuses prior pixel storage when exact Section metadata and RGBA8 bytes are unchanged. */
     bool BuildingMapRemote::StoreChangedImage(const BuildingMapABISectionImage& metadata)
     {
-        if (metadata.Width == 0 || metadata.Height == 0 ||
-            metadata.Width > (std::numeric_limits<uint64_t>::max)() / 4 ||
-            metadata.RowStride != uint64_t(metadata.Width) * 4 ||
-            metadata.RowStride > (std::numeric_limits<uint64_t>::max)() / metadata.Height ||
-            metadata.ByteCount != metadata.RowStride * metadata.Height ||
-            metadata.ByteCount != copyBuffer_.size())
+        if (!ValidateImageMetadata(metadata) || metadata.ByteCount != copyBuffer_.size())
         {
             return false;
         }
 
         const auto key = std::make_pair(metadata.GridX, metadata.GridY);
         auto existing = images_.find(key);
-        if (existing != images_.end() && existing->second.Width == metadata.Width &&
-            existing->second.Height == metadata.Height && existing->second.RowStride == metadata.RowStride &&
-            existing->second.ByteCount == metadata.ByteCount &&
-            existing->second.XMapUnits == metadata.XMapUnits &&
-            existing->second.YMapUnits == metadata.YMapUnits &&
-            existing->second.SectionSizeMapUnits == metadata.SectionSizeMapUnits &&
+        if (existing != images_.end() && MatchesRetainedImage(metadata, existing->second) &&
             std::equal(copyBuffer_.begin(), copyBuffer_.end(), existing->second.Pixels.begin(),
                 existing->second.Pixels.end()))
         {
             return true;
         }
 
+        return StoreNewImage(metadata, key);
+    }
+
+    /** Assigns a local image revision and retains the newly copied caller-owned pixels. */
+    bool BuildingMapRemote::StoreNewImage(const BuildingMapABISectionImage& metadata,
+        const SectionCoordinate& key)
+    {
         if (lastImageRevision_ == (std::numeric_limits<uint64_t>::max)())
         {
             return false;
