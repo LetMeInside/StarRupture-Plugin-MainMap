@@ -130,6 +130,8 @@ namespace MainMapBuildingMap
         /** Binds all overlap images to their target's shared MID before publication becomes visible. */
         bool BindGridOverlapConsumers(std::size_t slotIndex,
             const BuildingMapTarget::CompositeTargetInfo& targetInfo);
+        /** Reports slot and total consumer counts after a completed presentation update. */
+        void ReportGridConsumerCounts() noexcept;
         /** Emits changed-state counts for currently visible overlap consumers. */
         void ReportActiveOverlapCount() noexcept;
         /** Emits the current attached consumer count for one physical target slot. */
@@ -193,11 +195,7 @@ namespace MainMapBuildingMap
         bool ShowGridImage(std::size_t slotIndex) noexcept;
         /** Commits CPU publication identity after verified target binding, geometry, and visibility. */
         void StoreGridPublication(std::size_t slotIndex,
-            const BuildingMapTarget::CompositeTargetInfo& targetInfo
-#if defined(_DEBUG)
-            , bool recycledPhysicalTarget
-#endif
-            ) noexcept;
+            const BuildingMapTarget::CompositeTargetInfo& targetInfo) noexcept;
         /** Releases unbound current, candidate, and retired target leases while preserving failures. */
         bool ReleaseGridSlotTargets(std::size_t slotIndex) noexcept;
         /** Retries an old target lease after its slot MID has stopped referencing that target. */
@@ -377,6 +375,7 @@ namespace MainMapBuildingMap
         std::array<bool, BuildingMapGridPlanner::kPhysicalSlotCount> hasLoggedConsumerCount_{};
         std::size_t loggedActiveOverlapCount_ = 0;
         bool hasLoggedActiveOverlapCount_ = false;
+        bool consumerCountReportPending_ = false;
         bool nativeAssociationFailureLogged_ = false;
         std::int32_t rejectedSegmentIndex_ = -1;
         bool overlapGeometryReady_ = false;
@@ -386,7 +385,6 @@ namespace MainMapBuildingMap
         std::uintptr_t lastGridTreeIdentity_ = 0;
 #if defined(_DEBUG)
         bool firstGridCompositeLogged_ = false;
-        bool gridSessionRetired_ = false;
 #endif
         SectionTargetInfo presentedInfo_{};
         uint64_t epoch_ = 0;

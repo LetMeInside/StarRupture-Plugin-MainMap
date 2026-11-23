@@ -136,7 +136,12 @@ namespace MainMapBuildingMap
         }
         epoch_ = context.epoch;
         if (!ReconcilePresentationGeometry(context, canvas, tree, targets)) return false;
-        if (!sourceSnapshotCurrent || !materialResourcesReady) return WithdrawAllGridSlots();
+        if (!sourceSnapshotCurrent || !materialResourcesReady)
+        {
+            const bool withdrawn = WithdrawAllGridSlots();
+            if (withdrawn) ReportGridConsumerCounts();
+            return withdrawn;
+        }
         if (!EnsureParentForEligibleTargets(context, targets, sourceSnapshotCurrent, materialResourcesReady))
             return false;
         bool succeeded = true;
@@ -146,6 +151,7 @@ namespace MainMapBuildingMap
                 sourceSnapshotCurrent) && succeeded;
         }
         StoreGridAttachmentIdentity(canvas, tree);
+        ReportGridConsumerCounts();
         return succeeded;
     }
 
@@ -492,6 +498,8 @@ namespace MainMapBuildingMap
         auto* slot = static_cast<SDK::UCanvasPanelSlot*>(image->Slot);
         if (!ApplyOverlapLayout(overlap, slot, failureOperation)) return false;
         auto* material = targetSlot.materialInstance.Get();
+        const bool consumerStateChanged = image->Brush.ResourceObject != material ||
+            image->GetVisibility() != SDK::ESlateVisibility::HitTestInvisible;
         if (!SetOverlapBrush(overlap, image, material))
         {
             failureOperation = "shared-mid-brush-or-uv-writeback";
@@ -504,6 +512,7 @@ namespace MainMapBuildingMap
             failureOperation = "overlap-image-visibility";
             return false;
         }
+        if (consumerStateChanged) consumerCountReportPending_ = true;
         failureOperation = nullptr;
         return true;
     }
@@ -719,6 +728,8 @@ namespace MainMapBuildingMap
             auto* imageObject = overlapImages_[index].image.Get();
             if (!imageObject || !imageObject->IsA(SDK::UImage::StaticClass())) continue;
             auto* image = static_cast<SDK::UImage*>(imageObject);
+            if (image->GetVisibility() != SDK::ESlateVisibility::Collapsed || image->Brush.ResourceObject)
+                consumerCountReportPending_ = true;
             image->SetVisibility(SDK::ESlateVisibility::Collapsed);
             image->SetBrushFromMaterial(nullptr);
             if (image->GetVisibility() != SDK::ESlateVisibility::Collapsed || image->Brush.ResourceObject)
@@ -755,6 +766,7 @@ namespace MainMapBuildingMap
             loggedActiveOverlapCount_ = 0;
             hasLoggedActiveOverlapCount_ = false;
             hasLoggedConsumerCount_.fill(false);
+            consumerCountReportPending_ = false;
             nativeAssociationFailureLogged_ = false;
         }
         return retired;
@@ -885,18 +897,6 @@ namespace MainMapBuildingMap
         GridPresentationSlot& slot = gridSlots_[slotIndex];
         if (slot.HasPublication)
         {
-#if defined(_DEBUG)
-            BuildingMapGridPlanner::SlotAssignment assignment{};
-            assignment.PhysicalSlotIndex = static_cast<std::uint32_t>(slotIndex);
-            assignment.IsAssigned = true;
-            assignment.Tile = slot.Tile;
-            assignment.SessionEpoch = slot.SessionEpoch;
-            assignment.Bounds = slot.Bounds;
-            assignment.AssignmentGeneration = slot.AssignmentGeneration;
-            assignment.CommittedContentGeneration = slot.ContentGeneration;
-            LogGridSlotEvent(slotIndex, assignment, slot.ContentGeneration,
-                slot.target.Get(), "withdrawn");
-#endif
             slot.HasPublication = false;
             slot.Tile = {};
             slot.Bounds = {};
@@ -912,8 +912,6 @@ namespace MainMapBuildingMap
     {
         if (WithdrawOverlapImages(slotIndex))
         {
-            ReportTargetConsumerCount(slotIndex);
-            ReportActiveOverlapCount();
             return true;
         }
 #if defined(_DEBUG)
@@ -936,10 +934,6 @@ namespace MainMapBuildingMap
             return false;
         }
         if (!ClearGridSlotBrush(slotIndex) || !ReleaseGridSlotMaterial(slotIndex)) return false;
-#if defined(_DEBUG)
-        if (previousMaterial)
-            ReportGridSlotEvent(slotIndex, 0, nullptr, "presentation-mid-detached");
-#endif
         return true;
     }
 
@@ -963,10 +957,6 @@ namespace MainMapBuildingMap
 #endif
         if (WithdrawOverlapImages(slotIndex))
         {
-#if defined(_DEBUG)
-            if (previousTarget)
-                ReportGridSlotEvent(slotIndex, 0, previousTarget, "presentation-brush-detached");
-#endif
             return true;
         }
 #if defined(_DEBUG)
@@ -1001,10 +991,6 @@ namespace MainMapBuildingMap
         auto* pendingTarget = static_cast<SDK::UTextureRenderTarget2D*>(slot.candidateTarget.Get());
         const bool targetAssignmentChanged = retainedTarget == targetInfo.Target &&
             slot.HasTargetIdentity && !MatchesGridTargetIdentity(slot, targetInfo.Assignment, false);
-#if defined(_DEBUG)
-        const bool recycledPhysicalTarget = targetAssignmentChanged ||
-            targetInfo.TargetWasReusedForAssignment;
-#endif
         if (targetAssignmentChanged && slot.HasPublication) return false;
         if (pendingTarget == targetInfo.Target && slot.HasCandidateIdentity &&
             !MatchesGridTargetIdentity(slot, targetInfo.Assignment, true)) return false;
@@ -1028,11 +1014,7 @@ namespace MainMapBuildingMap
             StoreGridTargetIdentity(slot, targetInfo.Assignment, false);
         }
         if (!BindGridOverlapConsumers(slotIndex, targetInfo) || !ShowGridImage(slotIndex)) return false;
-#if defined(_DEBUG)
-        StoreGridPublication(slotIndex, targetInfo, recycledPhysicalTarget);
-#else
         StoreGridPublication(slotIndex, targetInfo);
-#endif
         ReleaseRetiredGridTarget(slotIndex);
         return true;
     }
@@ -1074,6 +1056,16 @@ namespace MainMapBuildingMap
             overlap.lastFailureOperation = nullptr;
         }
         return !slot.overlapMembers.empty();
+    }
+
+    /** Reports consumer counts only after all target slots reach the update's final state. */
+    void BuildingMapPresentation::ReportGridConsumerCounts() noexcept
+    {
+        if (!consumerCountReportPending_) return;
+        for (std::size_t slotIndex = 0; slotIndex < gridSlots_.size(); ++slotIndex)
+            ReportTargetConsumerCount(slotIndex);
+        ReportActiveOverlapCount();
+        consumerCountReportPending_ = false;
     }
 
     /** Logs the visible MainMap overlap image count only when it changes. */
@@ -1293,18 +1285,12 @@ namespace MainMapBuildingMap
             image->SetVisibility(SDK::ESlateVisibility::HitTestInvisible);
             if (image->GetVisibility() != SDK::ESlateVisibility::HitTestInvisible) return false;
         }
-        ReportTargetConsumerCount(slotIndex);
-        ReportActiveOverlapCount();
         return true;
     }
 
     /** Stores the exact published assignment and content identity after the slot becomes visible. */
     void BuildingMapPresentation::StoreGridPublication(std::size_t slotIndex,
-        const BuildingMapTarget::CompositeTargetInfo& targetInfo
-#if defined(_DEBUG)
-        , bool recycledPhysicalTarget
-#endif
-        ) noexcept
+        const BuildingMapTarget::CompositeTargetInfo& targetInfo) noexcept
     {
         GridPresentationSlot& slot = gridSlots_[slotIndex];
         const auto& assignment = targetInfo.Assignment;
@@ -1315,13 +1301,12 @@ namespace MainMapBuildingMap
         slot.ContentGeneration = assignment.CommittedContentGeneration;
         slot.HasPublication = true;
 #if defined(_DEBUG)
-        const char* event = recycledPhysicalTarget ? "recycled-target-published" :
-            (gridSessionRetired_ ? "republished-after-reopen" :
-                (firstGridCompositeLogged_ ? "grid-slot-published" : "first-visible-composite"));
-        LogGridSlotEvent(slotIndex, assignment, assignment.CommittedContentGeneration,
-            slot.target.Get(), event);
-        firstGridCompositeLogged_ = true;
-        gridSessionRetired_ = false;
+        if (!firstGridCompositeLogged_)
+        {
+            LogGridSlotEvent(slotIndex, assignment, assignment.CommittedContentGeneration,
+                slot.target.Get(), "first-visible-composite");
+            firstGridCompositeLogged_ = true;
+        }
         gridSlots_[slotIndex].HasLastFailure = false;
 #endif
     }
@@ -1887,7 +1872,6 @@ namespace MainMapBuildingMap
     /** Detaches widgets before releasing leases and retains retry state after any failed release. */
     bool BuildingMapPresentation::Retire(bool widgetDestructionStarted) noexcept
     {
-        const std::uint64_t retiringEpoch = epoch_;
         if (!MainMapNative::CanOperate() || !MainMapNative::IsGameThread())
         {
             LogRetirementFailure("native-admission-or-game-thread");
@@ -1902,7 +1886,6 @@ namespace MainMapBuildingMap
 #if defined(_DEBUG)
         BuildingMapGridPlanner::SlotAssignment assignment{};
         LogGridSlotEvent(gridSlots_.size(), assignment, 0, nullptr, "cleanup-complete");
-        gridSessionRetired_ = retiringEpoch != 0;
 #endif
         return true;
     }
