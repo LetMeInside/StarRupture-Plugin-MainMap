@@ -1,8 +1,10 @@
 # MainMap material authoring and candidate cooking
 
-This directory contains the source authoring and candidate-cook tools. The BCT1 source and five-package material inventory are accepted. A newly cooked candidate remains separate from the accepted resource triplet until its three container files and pins are promoted together.
+> **Historical status:** This guide records the BCT1 material authoring and candidate-cook work and its verification status at that time. Commands, hashes, package inventories, stage names, and unperformed verification below are retained as historical evidence, not current runtime architecture or release status. MainMap v1.0.1 has been released and runtime-tested. For the current Building Map Service pipeline, see the [root README](../../../README.md).
 
-MainMap now uses only `M_BuildingComplexPresent` at runtime. The accepted baseline, authored legacy material sources, and embedded `MainMapMaterials` triplet still include `M_BuildingCompose`, `M_BuildingPresent`, `T_ComposeDefault`, and `T_PresentDefault`. Removing those packages from production requires a separately reviewed Unreal cook and IoStore repackaging pass, followed by updating the accepted resource inventory and embedded-resource digest. That packaging has not been performed; do not hand-edit the accepted hashes or substitute an improvised container.
+This directory contains the source authoring and candidate-cook tools. The accepted BCT1 source and five-package material inventory documented below remain package evidence. A newly cooked candidate remains separate from the accepted resource triplet until its three container files and pins are promoted together.
+
+Current runtime code uses `M_BuildingPresent` with the `BuildingTarget` texture parameter and `M_BuildingCompose` with `SpriteAtlas`; MainMap owns composite render targets. The historical BCT1-only runtime used `M_BuildingComplexPresent`. The accepted baseline and embedded `MainMapMaterials` triplet retain that package alongside `M_BuildingCompose`, `M_BuildingPresent`, `T_ComposeDefault`, and `T_PresentDefault`. Package presence does not establish runtime use. Do not hand-edit accepted hashes or substitute an improvised container.
 
 ## Verified toolchain and boundaries
 
