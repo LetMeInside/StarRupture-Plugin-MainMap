@@ -65,6 +65,31 @@ jobs:
             }
           }
 
+      - name: Checkout MiniMap ABI dependency
+        shell: pwsh
+        run: |
+          $miniMapRoot = [System.IO.Path]::GetFullPath(
+            (Join-Path $env:GITHUB_WORKSPACE "..\..\MiniMap\Solution")
+          )
+          $abiHeader = Join-Path $miniMapRoot `
+            "Src\Services\Map\Buildings\BuildingMapServiceABI.h"
+
+          Write-Host "MiniMap checkout destination: $miniMapRoot"
+
+          if (Test-Path $miniMapRoot) {
+            throw "MiniMap checkout destination already exists: $miniMapRoot"
+          }
+
+          git clone --depth 1 `
+            https://github.com/LetMeInside/StarRupture-Plugin-MiniMap.git `
+            "$miniMapRoot"
+
+          if (-not (Test-Path $abiHeader)) {
+            throw "Required MiniMap ABI header not found: $abiHeader"
+          }
+
+          Write-Host "Verified MiniMap ABI header: $abiHeader"
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
