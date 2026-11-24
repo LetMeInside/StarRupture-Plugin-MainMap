@@ -52,6 +52,7 @@ namespace
         bool terrainDestructionStarted=false;
         bool presentationRetired=false;
         bool buildingLayerDisabled=false;
+        bool hideFogEligibilityLogged=false;
         bool providerWorldValid=false;
         bool viewportScaleObserved=false;
         bool zoomSettlementPending=false;
@@ -695,7 +696,7 @@ namespace MainMapBuildingLayer
             return;
         }
 
-        if (!Config::Get().ShowBuildingLayer)
+        if (!Config::IsBuildingLayerEnabled())
         {
             if (!session.buildingLayerDisabled)
             {
@@ -713,6 +714,13 @@ namespace MainMapBuildingLayer
             if (TryGetConsumerContext(fogContext) &&
                 TryGetTilePresentationContext(fogCanvas, fogTree))
             {
+                if (!session.hideFogEligibilityLogged)
+                {
+                    LOG_INFO("MainMap: terrain session eligible for presentation epoch=%llu HideFoW=%s",
+                        static_cast<unsigned long long>(session.epoch),
+                        Config::IsHideFoWEnabled() ? "true" : "false");
+                    session.hideFogEligibilityLogged=true;
+                }
                 session.presentationRetired=false;
                 MainMapBuildingMap::BuildingMapPresentation::UpdateNativeFogShared(
                     fogContext, fogCanvas, fogTree);
@@ -736,6 +744,13 @@ namespace MainMapBuildingLayer
             g_buildingMapRemote.CloseViewport();
             session.ResetProviderViewportState();
             return;
+        }
+        if (!session.hideFogEligibilityLogged)
+        {
+            LOG_INFO("MainMap: terrain session eligible for presentation epoch=%llu HideFoW=%s",
+                static_cast<unsigned long long>(session.epoch),
+                Config::IsHideFoWEnabled() ? "true" : "false");
+            session.hideFogEligibilityLogged=true;
         }
         MainMapBuildingLayer::WorldRect visibleWorld{};
         if (!TryGetVisibleWorldRect(visibleWorld))
@@ -854,7 +869,7 @@ namespace MainMapBuildingLayer
         if (!session.layout)
             return;
 
-        const bool expanded = Config::Get().ExpandedMap;
+        const bool expanded = Config::IsExpandedMapEnabled();
         const SDK::FVector2D allottedSize = expanded
             ? SDK::USlateBlueprintLibrary::GetLocalSize(geometry)
             : SDK::FVector2D{};

@@ -180,7 +180,7 @@ namespace MainMapBuildingMap
             return false;
         }
         StoreGridAttachmentIdentity(canvas, tree);
-        return ApplyNativeFogPreference(Config::Get().HideFoW);
+        return ApplyNativeFogPreference(Config::IsHideFoWEnabled());
     }
 
     /** Reconciles native and overlap geometry, reporting an invalid segment association once per failure period. */
@@ -207,7 +207,7 @@ namespace MainMapBuildingMap
             return false;
         }
         nativeAssociationFailureLogged_ = false;
-        ApplyNativeFogPreference(Config::Get().HideFoW);
+        ApplyNativeFogPreference(Config::IsHideFoWEnabled());
         return ReconcileOverlapGeometry(targets);
     }
 
@@ -377,11 +377,12 @@ namespace MainMapBuildingMap
         return true;
     }
 
-    /** Applies HideFoW to the validated native fog images and skips unchanged preferences. */
+    /** Applies HideFoW to validated images and reconciles native visibility changes. */
     bool BuildingMapPresentation::ApplyNativeFogPreference(bool hideFog) noexcept
     {
         if (!MainMapNative::CanOperate() || !MainMapNative::IsGameThread()) return false;
-        if (nativeFogPreferenceObserved_ && nativeFogPreference_ == hideFog) return true;
+        const bool preferenceWasApplied = nativeFogPreferenceObserved_ && nativeFogPreference_;
+        if (nativeFogPreferenceObserved_ && !nativeFogPreference_ && !hideFog) return true;
         if (!hideFog)
         {
             if (!RestoreNativeFogPresentation()) return false;
@@ -392,22 +393,28 @@ namespace MainMapBuildingMap
 
         for (auto& association : nativeSegments_)
         {
-            if (association.hasOriginalFogVisibility) continue;
             auto* object = association.fogImage.Get();
             if (!IsLiveNativeFogImage(object)) return false;
             auto* image = static_cast<SDK::UImage*>(object);
-            association.originalFogVisibility = image->GetVisibility();
-            association.hasOriginalFogVisibility = true;
-            if (association.originalFogVisibility != SDK::ESlateVisibility::Hidden)
+            if (!association.hasOriginalFogVisibility)
+            {
+                association.originalFogVisibility = image->GetVisibility();
+                association.hasOriginalFogVisibility = true;
+            }
+            if (image->GetVisibility() != SDK::ESlateVisibility::Hidden)
                 image->SetVisibility(SDK::ESlateVisibility::Hidden);
             if (image->GetVisibility() != SDK::ESlateVisibility::Hidden)
             {
-                association.hasOriginalFogVisibility = false;
                 return false;
             }
         }
         nativeFogPreference_ = true;
         nativeFogPreferenceObserved_ = true;
+        if (!preferenceWasApplied)
+        {
+            LOG_INFO("MainMap: HideFoW=true applied to native fog images count=%llu",
+                static_cast<unsigned long long>(nativeSegments_.size()));
+        }
         return true;
     }
 

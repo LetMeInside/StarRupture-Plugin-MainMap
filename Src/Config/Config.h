@@ -1,7 +1,7 @@
 /**
  * MainMap settings declared to and read from the ModLoader configuration API.
- * Values are returned as owned snapshots so consumers can safely read them
- * without retaining shared mutable storage.
+ * Startup values and live edits are published as atomic Boolean preferences
+ * for game-thread consumers that run on every tick.
  */
 #pragma once
 
@@ -25,6 +25,12 @@ namespace Config
     /** Stops accepting edits and unregisters the ModLoader change callback. */
     void Shutdown();
 
-    /** Returns a synchronized copy that remains valid after the call returns. */
-    Settings Get();
+    /** Reads ExpandedMap without acquiring the configuration lifecycle mutex. */
+    bool IsExpandedMapEnabled() noexcept;
+
+    /** Reads HideFoW without acquiring the configuration lifecycle mutex. */
+    bool IsHideFoWEnabled() noexcept;
+
+    /** Reads ShowBuildingLayer without acquiring the configuration lifecycle mutex. */
+    bool IsBuildingLayerEnabled() noexcept;
 }
