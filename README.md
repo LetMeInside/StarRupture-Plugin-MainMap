@@ -1,67 +1,95 @@
-# StarRupture MainMap
+# MainMap mod for StarRupture
 
-## Overview
+[Watch the MainMap Showcase on YouTube](https://www.youtube.com/watch?v=c1P9LzkxvQ4)
 
-MainMap enhances StarRupture's existing in-game world map by displaying player-built structures using building-map imagery supplied by MiniMap. It integrates with the native map and preserves its terrain, markers, navigation, panning, zooming, and clipping.
+**Your buildings. Your world.**
+
+See what you've built like never before.
+
+MainMap enhances StarRupture's native world map by bringing your constructed buildings, factories and transport networks directly onto the map. From individual production facilities to sprawling industrial complexes spanning vast areas of the world, MainMap gives you a whole new perspective on your creations.
+
+Designed as a companion mod to MiniMap, MainMap extends its detailed building visualization technology to the game's full world map while preserving the familiar map interface and navigation controls.
 
 ## Features
 
-- Player-built structures displayed on the world map using MiniMap's building imagery.
-- Optional expanded native world map layout.
-- Optional hiding of Fog of War presentation.
-- Independent control over building-overlay visibility.
-- Native map navigation, terrain, and markers retained.
+### Detailed Building Visualization
 
-Building visualization depends on the imagery available from MiniMap; this is not a guarantee that every building type is represented.
+See the actual layouts of your constructed buildings directly on the world map. Rather than representing your factories with generic markers, MainMap displays detailed building imagery that allows you to recognize your structures, production facilities and infrastructure.
 
-## Requirements and installation
+### Expanded World Map
 
-- StarRupture.
-- [AlienX Mod Loader](https://github.com/AlienXAXS/StarRupture-ModLoader).
-- [MiniMap](https://github.com/LetMeInside/StarRupture-Plugin-MiniMap), required for building visualization.
+Make better use of your screen space with an enlarged world map. Enjoy a broader view of your surroundings and a more convenient overview of your factory complexes and transport networks.
 
-Download the latest compatible releases of [MainMap](https://github.com/LetMeInside/StarRupture-Plugin-MainMap/releases), MiniMap, and AlienX Mod Loader. Follow the [Mod Loader installation and plugin instructions](https://github.com/AlienXAXS/StarRupture-ModLoader#installation) and the instructions supplied with the MainMap and MiniMap releases.
+### Optional Fog of War
+
+Choose whether to display or hide the Fog of War covering unexplored areas of the world map. Hiding the Fog of War is purely visual and does not modify your exploration progress.
+
+### Toggle Building Visibility
+
+Show or hide the building overlay independently of the other map features. Easily switch between the original terrain map and the enhanced map displaying your constructions.
+
+### Native Map Integration
+
+MainMap enhances the existing StarRupture map rather than replacing it. The familiar terrain, map markers, panning and zooming functionality remain available, with building imagery correctly aligned to the world as you navigate.
+
+### Live Configuration
+
+Customize your map while playing. Changes to the available settings can be applied while the world map is open.
+
+### A Companion to MiniMap
+
+MiniMap helps you navigate your immediate surroundings, while MainMap gives you the big picture. Both mods share the same underlying building visualization technology, providing a complementary mapping experience.
 
 ## Configuration
 
-MainMap registers these Boolean entries with ModLoader's configuration system:
+MainMap's settings are accessible through AlienX Mod Loader's in-game menu (F2).
 
-| Entry | Default | Effect |
+| Setting | Default | Description |
 | --- | --- | --- |
-| `Map.ExpandedMap` | `true` | Enables the expanded native world map layout. Set to `false` for the game's original layout. |
-| `Map.HideFoW` | `false` | Hides native Fog of War presentation when enabled. |
-| `Buildings.ShowLayer` | `true` | Shows the building overlay; disable it independently of the layout and fog preferences. |
+| Expanded Map | Enabled | Enlarges the native world map to provide more viewing space. |
+| Hide Fog of War | Disabled | Hides the visual Fog of War without modifying exploration progress. |
+| Show Buildings | Enabled | Displays constructed buildings and infrastructure on the world map. |
 
-`HideFoW` affects visual presentation only. It does not modify the game's exploration data. MainMap reads saved settings at startup and observes live configuration changes through ModLoader.
+All three features can be configured independently to suit your preferences.
 
-## Architecture
+## Requirements
 
-MiniMap owns building discovery, geometry generation, and Building Map Service image production and publication. MainMap consumes those completed images and integrates them into the native world map; it does not independently discover buildings or generate their geometry.
+- [AlienX Mod Loader](https://www.nexusmods.com/starrupture/mods/89)
+- [MiniMap](https://www.nexusmods.com/starrupture/mods/150)
 
-MainMap owns native map integration, terrain-session and viewport management, composite-grid preparation and rendering, presentation beneath native Fog of War, and native map layout and visibility preferences.
+Download the latest compatible releases of MainMap, MiniMap, and AlienX Mod Loader.
 
-The active pipeline is:
+## Installation
 
-1. [BuildingLayer](Src/Map/BuildingLayer.cpp) observes native terrain lifecycle and map visibility, retains session objects, derives the clipped visible world rectangle, and coordinates viewport updates, rendering, layout, and cleanup.
-2. [BuildingMapRemote](Src/Map/BuildingMapRemote.h) discovers `MiniMap_GetBuildingMapServiceABI`, validates its service table, and manages opaque collector and viewport handles. It polls completed Section images and copies their RGBA8 pixels into MainMap-owned buffers; provider objects and scheduling remain in MiniMap.
-3. [BuildingMapTarget](Src/Map/BuildingMapTarget.h), using [BuildingMapGridPlanner](Src/Map/BuildingMapGridPlanner.h), imports source images and prepares a bounded composite grid with six physical target slots. MainMap owns these render targets and the source texture/material resources. Changed assignments and source observations drive recomposition; physical targets can be reused within the terrain session.
-4. [BuildingMapPresentation](Src/Map/BuildingMapPresentation.h) binds eligible composites to presentation materials and creates segment-local cropped images where composite bounds overlap native terrain segments. The images sit above terrain and beneath native Fog of War. Crops follow each composite's world bounds while native map transforms and clipping remain in control.
+Install AlienX Mod Loader and MiniMap, then download the MainMap Client Release package.
 
-Presentation is withdrawn before dirty or reassigned targets are redrawn. Session changes and shutdown retire presentation, target resources, and provider viewport ownership through the existing lifecycle and UObject lease handling.
+1. Right-click StarRupture in Steam and select **Manage > Browse local files**.
+2. Navigate to `StarRupture\Binaries\Win64\ModLoader\`.
+3. Extract the MainMap Client Release ZIP into that `ModLoader` directory. Its `Plugins/` folder places the files in `StarRupture\Binaries\Win64\ModLoader\Plugins\`.
 
-## Materials
+The ZIP contains:
 
-Runtime material paths and texture parameters are:
+```text
+Plugins/
+    MainMap.dll
+    MainMap.pdb
+    MainMap.json
+```
 
-| Role | Material path | Texture parameter |
-| --- | --- | --- |
-| Composite rendering | `/Game/Mods/MiniMap/Materials/M_BuildingCompose.M_BuildingCompose` | `SpriteAtlas` |
-| Native map presentation | `/Game/Mods/MainMap/Materials/M_BuildingPresent.M_BuildingPresent` | `BuildingTarget` |
+Alternatively, copy `MainMap.dll`, `MainMap.pdb`, and `MainMap.json` from the archive into the `ModLoader\Plugins\` directory directly.
 
-The composition material draws imported Section images into MainMap-owned composite render targets. Presentation uses those targets, with segment-local cropping supplied through image-brush UV regions. The materials are loaded from the mounted material content; cook/package history is separate from the active rendering architecture.
+## Two Mods - One Connected World
 
-## Development documentation
+**MiniMap** - Navigate your surroundings and see your nearby buildings while playing.
 
-The linked source headers above describe the current service consumer, grid, target ownership, and presentation responsibilities. Configuration is declared in [Config.h](Src/Config/Config.h) and [Config.cpp](Src/Config/Config.cpp); plugin initialization and shutdown are in [plugin.cpp](Src/plugin.cpp).
+**MainMap** - Explore the bigger picture and see your constructed world from the native world map.
 
-The [material authoring and cook guide](Src/Content/Cook/README.md) preserves historical BCT1 authoring, package inventory, and verification evidence. Its historical runtime descriptions do not describe the current Building Map Service pipeline.
+Together, they provide a more informative mapping experience for StarRupture, whether you are exploring new territory, expanding your factory or managing an extensive industrial network.
+
+## Source Code and License
+
+The source code of MainMap is available in the [MainMap GitHub repository](https://github.com/LetMeInside/StarRupture-Plugin-MainMap) under the MainMap Source Available License. See [LICENSE](LICENSE) for details.
+
+## Technical Documentation
+
+Developers can read the [technical architecture documentation](Docs/Architecture.md) to understand MainMap's implementation.
