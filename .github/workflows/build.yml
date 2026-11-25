@@ -213,7 +213,7 @@ jobs:
           } | ConvertTo-Json
           Set-Content -Path $manifestPath -Value $manifest -Encoding utf8
 
-          $package = Join-Path $root "package"
+          $package = Join-Path $root "package\Client"
           $zip = Join-Path $root "$env:PLUGIN_NAME-Client-v$env:VERSION.zip"
           Compress-Archive -Path "$package\*" -DestinationPath $zip -Force
 
@@ -252,9 +252,9 @@ jobs:
           $archive = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
           try {
             $expectedEntries = @(
-              "Client/Plugins/$env:PLUGIN_NAME.dll",
-              "Client/Plugins/$env:PLUGIN_NAME.pdb",
-              "Client/Plugins/$env:PLUGIN_NAME.json"
+              "Plugins/$env:PLUGIN_NAME.dll",
+              "Plugins/$env:PLUGIN_NAME.pdb",
+              "Plugins/$env:PLUGIN_NAME.json"
             )
             foreach ($entry in $expectedEntries) {
               $zipEntry = $archive.Entries | Where-Object { $_.FullName -eq $entry }
