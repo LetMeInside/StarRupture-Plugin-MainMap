@@ -102,6 +102,10 @@ Together, they provide a more informative mapping experience for StarRupture, wh
 
 The source code of MainMap is available in the [MainMap GitHub repository](https://github.com/LetMeInside/StarRupture-Plugin-MainMap) under the MainMap Source Available License. See [LICENSE](LICENSE) for details.
 
+## Contributions
+
+Contributions are welcome subject to review. External copyrightable contributions require agreement to the [Contributor Assignment and License Agreement](CLA.md) and an appropriately executed written copyright assignment before merge. See [CONTRIBUTING.md](CONTRIBUTING.md) for the limited contribution permission, execution requirements and submission process.
+
 ## Technical Documentation
 
 Developers can read the [technical architecture documentation](Docs/Architecture.md) to understand MainMap's implementation.
